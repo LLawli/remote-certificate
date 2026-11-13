@@ -29,6 +29,16 @@ const DIGEST_INFO_SHA512: [u8; 19] = [
     0x00, 0x04, 0x40,
 ];
 
+/// A primeira versão do `remoteid` com o DER do certificado na visão e o
+/// `digest_info` no `assinar`. Ele não diz a versão: o driver reconhece um
+/// anterior pelo que falta no protocolo.
+const REMOTEID_MINIMO: &str = "0.5.1";
+
+/// O que um `servir` anterior ao mínimo responde a um `digest_info` (ele recusa
+/// campos desconhecidos); o mínimo nunca o diz, porque o driver só manda o
+/// campo com o formato `cru`.
+const SEM_DIGEST_INFO: &str = "unknown field `digest_info`";
+
 /// As regras de recusa do `servir` (o fragmento em `regra=`) que dizem que o
 /// servidor recusou a senha, o PIN ou o OTP.
 const RECUSAS: [&str; 4] = [
@@ -111,6 +121,9 @@ pub fn assinar(id: u64, chave: &str, entrada: Entrada) -> Value {
 
 /// Um erro do `servir` no vocabulário do contrato.
 pub fn erro(tipo: &str, mensagem: &str) -> Erro {
+    if tipo == "pedido_invalido" && mensagem.contains(SEM_DIGEST_INFO) {
+        return remoteid_antigo();
+    }
     let tipo = match tipo {
         "cancelado" => TipoDeErro::Cancelado,
         "pin_bloqueado" => TipoDeErro::Bloqueado,
@@ -158,8 +171,17 @@ pub fn fatores(id: u64, fatores: &BTreeMap<String, Segredo>) -> Value {
     json!({"id": id, "fatores": saida})
 }
 
+fn remoteid_antigo() -> Erro {
+    Erro {
+        tipo: TipoDeErro::VersaoIncompativel,
+        mensagem: format!(
+            "o remoteid instalado é anterior ao {REMOTEID_MINIMO}; atualize para ele ou um mais novo"
+        ),
+    }
+}
+
 /// As chaves da visão do `servir`. Um certificado sem DER na carteira fica de
-/// fora: sem ele não há o que expor.
+/// fora: sem ele não há o que expor. Sem o campo, o `remoteid` é antigo.
 pub fn chaves(visao: &Value) -> Result<Vec<Chave>, Erro> {
     if visao["preparado"] != json!(true) {
         return Err(Erro {
@@ -171,6 +193,9 @@ pub fn chaves(visao: &Value) -> Result<Vec<Chave>, Erro> {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if certificados.iter().any(|c| c.get("certificado").is_none()) {
+        return Err(remoteid_antigo());
+    }
     Ok(certificados
         .iter()
         .filter_map(|c| {
@@ -243,6 +268,31 @@ mod testes {
         assert_eq!(
             erro("nao_preparado: sem conta", "").tipo,
             TipoDeErro::NaoConfigurado
+        );
+    }
+
+    #[test]
+    fn remoteid_antigo_e_reconhecido_pelo_que_falta_no_protocolo() {
+        // Antes do 0.5.1 a visão não tinha o campo `certificado`.
+        let antiga = json!({"preparado": true, "certificados": [{"chave": "k", "titular": "T"}]});
+        assert_eq!(
+            chaves(&antiga).unwrap_err().tipo,
+            TipoDeErro::VersaoIncompativel
+        );
+        // No 0.5.1, um certificado sem DER na carteira só fica de fora.
+        let sem_der = json!({"preparado": true,
+                             "certificados": [{"chave": "k", "certificado": null}]});
+        assert!(chaves(&sem_der).unwrap().is_empty());
+
+        let recusa = "unknown field `digest_info`, expected one of `formato`, `hash`";
+        assert_eq!(
+            erro("pedido_invalido", recusa).tipo,
+            TipoDeErro::VersaoIncompativel
+        );
+        let outro = "missing field `certificado`";
+        assert_eq!(
+            erro("pedido_invalido", outro).tipo,
+            TipoDeErro::PedidoInvalido
         );
     }
 
