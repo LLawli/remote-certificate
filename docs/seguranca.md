@@ -172,6 +172,10 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
 
 ## Riscos aceitos
 
+- **Quem tem a chave do banco reescreve a auditoria inteira**, com selos novos
+  que fecham. A corrente só prova que nada mudou antes do último selo anotado
+  fora da máquina (`auditoria verificar`); a anotação é do administrador.
+
 - **Root no host**, ou quem está no grupo `docker`, lê a memória do servidor e
   o secret enquanto ele roda.
 - **Quem controla o host ligado** abre a chave do TPM como o serviço abre. O

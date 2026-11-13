@@ -2,6 +2,7 @@
 //! O desenho está em `docs/arquitetura.md`.
 
 pub mod agente;
+pub mod auditoria;
 pub mod banco;
 pub mod driver;
 pub mod fatores;

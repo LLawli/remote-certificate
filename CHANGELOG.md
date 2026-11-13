@@ -45,6 +45,11 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   rodando relança o driver daquele token.
 - `remote-certificate dispositivo revogar`: a chave do dispositivo deixa de
   ser aceita, inclusive numa conexão já aberta.
+- Auditoria só de acréscimo: cada assinatura, cada tentativa de PIN pessoal e
+  cada mudança em quem pode assinar, com o SHA-256 do que foi assinado e nada
+  secreto. O banco recusa alterar ou apagar uma linha, e cada linha é selada
+  com a anterior. Nenhuma assinatura sai sem a linha dela.
+- `remote-certificate auditoria listar|verificar`.
 - O container sobe com `servir`; `PUBLICAR` escolhe onde a porta aparece no
   host (o IP da tailnet, por exemplo).
 - O servidor e o driver RemoteID não se deixam inspecionar por outro processo

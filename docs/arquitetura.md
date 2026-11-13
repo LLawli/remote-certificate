@@ -193,9 +193,25 @@ de usar aquele token até o administrador corrigir.
 
 ### Auditoria
 
-Registro só de acréscimo: quando, usuário, dispositivo, token, chave, mecanismo,
-o SHA-256 do que foi assinado e o resultado. PIN, OTP, senha e documento nunca
-entram, nem em log. `protocolo::Segredo` não aparece em `Debug` por isso.
+Registro só de acréscimo (`servidor::auditoria`, tabela `auditoria`): quando,
+usuário, dispositivo, token, chave, mecanismo, o SHA-256 do que foi assinado e
+o resultado. PIN, OTP, senha e documento nunca entram, nem em log.
+`protocolo::Segredo` não aparece em `Debug` por isso.
+
+- Entram cada assinatura que chega ao token (`assinada`, `cancelada`,
+  `token_parado`, `driver_<tipo>`...), cada tentativa de PIN pessoal
+  (`aceita`, `pin_errado`, `pin_errado_bloqueou`, `bloqueado`) e cada mudança
+  em quem pode assinar: usuário criado, PIN trocado, token criado e
+  configurado, pareamento, dispositivo criado, desbloqueio e revogação. A
+  linha é gravada na mesma transação da mudança.
+- Nenhuma assinatura sai sem a linha dela: se a auditoria não grava, o
+  servidor descarta a assinatura e responde com erro.
+- O banco recusa `UPDATE` e `DELETE` na tabela (gatilhos). Cada linha leva um
+  selo, o SHA-256 do selo anterior e dos campos dela, então quem mexe por fora,
+  com a chave do banco, quebra a corrente dali em diante.
+- `remote-certificate auditoria listar [--ultimas <n>]` mostra as linhas;
+  `auditoria verificar` refaz a corrente e mostra o selo da última linha, que
+  o administrador anota fora da máquina de tempos em tempos.
 
 ## Container
 

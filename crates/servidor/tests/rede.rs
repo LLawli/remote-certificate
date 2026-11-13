@@ -387,7 +387,7 @@ async fn tres_pins_errados_bloqueiam_e_avisam_as_outras_conexoes() {
 
     // O administrador desbloqueia (dispositivo desbloquear).
     let dispositivo: IdDoDispositivo = pareado.dispositivo.to_string().parse().unwrap();
-    assert!(travar(&servidor.banco).zerar_erros(dispositivo).unwrap());
+    assert!(travar(&servidor.banco).desbloquear(dispositivo).unwrap());
     assert_eq!(
         pedir_ao_servidor(&mut conexao, entrar("2468")).await,
         DoServidor::Entrou { id: 1 }

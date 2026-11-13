@@ -17,6 +17,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::auditoria::{self, Lancamento, Linha, Verificacao};
+
 pub const TAMANHO_DA_CHAVE: usize = 32;
 
 /// A chave crua de 256 bits do banco, travada na RAM.
@@ -89,6 +91,25 @@ const MIGRACOES: &[&str] = &[
     "
     ALTER TABLE dispositivo ADD COLUMN revogado INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE token ADD COLUMN geracao INTEGER NOT NULL DEFAULT 0;
+",
+    "
+    CREATE TABLE auditoria (
+        id INTEGER PRIMARY KEY,
+        quando_ms INTEGER NOT NULL,
+        evento TEXT NOT NULL,
+        usuario INTEGER REFERENCES usuario (id),
+        dispositivo INTEGER REFERENCES dispositivo (id),
+        token TEXT,
+        chave TEXT,
+        mecanismo TEXT,
+        resumo BLOB,
+        resultado TEXT NOT NULL,
+        selo BLOB NOT NULL
+    ) STRICT;
+    CREATE TRIGGER auditoria_sem_alteracao BEFORE UPDATE ON auditoria
+    BEGIN SELECT RAISE(ABORT, 'a auditoria é só de acréscimo'); END;
+    CREATE TRIGGER auditoria_sem_remocao BEFORE DELETE ON auditoria
+    BEGIN SELECT RAISE(ABORT, 'a auditoria é só de acréscimo'); END;
 ",
 ];
 
@@ -222,7 +243,9 @@ pub type Instante = i64;
 pub enum Reserva {
     Desconhecido,
     /// O dispositivo já chegou ao limite de erros: nada foi contado.
-    Bloqueado,
+    Bloqueado {
+        usuario: IdDoUsuario,
+    },
     /// Contada como erro até o PIN conferir.
     Contada {
         usuario: IdDoUsuario,
@@ -306,11 +329,23 @@ impl Banco {
         argumentos: &[String],
     ) -> Result<IdDoToken, FalhaDoBanco> {
         let argumentos = serde_json::to_string(argumentos).expect("strings viram JSON");
-        self.conexao.execute(
+        let transacao = self.imediata()?;
+        transacao.execute(
             "INSERT INTO token (nome, driver, argumentos) VALUES (?1, ?2, ?3)",
             params![nome, driver, argumentos],
         )?;
-        Ok(IdDoToken(self.conexao.last_insert_rowid()))
+        let id = IdDoToken(transacao.last_insert_rowid());
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "token_criado",
+                token: Some(nome.to_string()),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
+        transacao.commit()?;
+        Ok(id)
     }
 
     pub fn tokens(&self) -> Result<Vec<RegistroDoToken>, FalhaDoBanco> {
@@ -372,7 +407,7 @@ impl Banco {
         token: IdDoToken,
         cofre: &BTreeMap<String, Segredo>,
     ) -> Result<(), FalhaDoBanco> {
-        let transacao = self.conexao.unchecked_transaction()?;
+        let transacao = self.imediata()?;
         transacao.execute("DELETE FROM fator_guardado WHERE token = ?1", [token.0])?;
         for (nome, valor) in cofre {
             transacao.execute(
@@ -383,6 +418,19 @@ impl Banco {
         transacao.execute(
             "UPDATE token SET desatualizado = NULL, geracao = geracao + 1 WHERE id = ?1",
             [token.0],
+        )?;
+        let nome: String =
+            transacao.query_row("SELECT nome FROM token WHERE id = ?1", [token.0], |l| {
+                l.get(0)
+            })?;
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "token_configurado",
+                token: Some(nome),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
         )?;
         transacao.commit()?;
         Ok(())
@@ -403,11 +451,23 @@ impl Banco {
     }
 
     pub fn criar_usuario(&self, nome: &str, pin: &HashDoPin) -> Result<IdDoUsuario, FalhaDoBanco> {
-        self.conexao.execute(
+        let transacao = self.imediata()?;
+        transacao.execute(
             "INSERT INTO usuario (nome, pin) VALUES (?1, ?2)",
             params![nome, pin.0],
         )?;
-        Ok(IdDoUsuario(self.conexao.last_insert_rowid()))
+        let usuario = IdDoUsuario(transacao.last_insert_rowid());
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "usuario_criado",
+                usuario: Some(usuario.0),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
+        transacao.commit()?;
+        Ok(usuario)
     }
 
     pub fn usuario(&self, nome: &str) -> Result<Option<IdDoUsuario>, FalhaDoBanco> {
@@ -420,10 +480,21 @@ impl Banco {
     }
 
     pub fn trocar_pin(&self, usuario: IdDoUsuario, pin: &HashDoPin) -> Result<(), FalhaDoBanco> {
-        self.conexao.execute(
+        let transacao = self.imediata()?;
+        transacao.execute(
             "UPDATE usuario SET pin = ?2 WHERE id = ?1",
             params![usuario.0, pin.0],
         )?;
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "pin_trocado",
+                usuario: Some(usuario.0),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
+        transacao.commit()?;
         Ok(())
     }
 
@@ -434,11 +505,24 @@ impl Banco {
         nome: &str,
         chave_publica: &[u8],
     ) -> Result<IdDoDispositivo, FalhaDoBanco> {
-        self.conexao.execute(
+        let transacao = self.imediata()?;
+        transacao.execute(
             "INSERT INTO dispositivo (usuario, nome, chave_publica) VALUES (?1, ?2, ?3)",
             params![usuario.0, nome, chave_publica],
         )?;
-        Ok(IdDoDispositivo(self.conexao.last_insert_rowid()))
+        let dispositivo = IdDoDispositivo(transacao.last_insert_rowid());
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "dispositivo_criado",
+                usuario: Some(usuario.0),
+                dispositivo: Some(dispositivo.0),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
+        transacao.commit()?;
+        Ok(dispositivo)
     }
 
     pub fn dispositivos(&self) -> Result<Vec<RegistroDoDispositivo>, FalhaDoBanco> {
@@ -484,11 +568,51 @@ impl Banco {
     /// O dispositivo deixa de ser atendido, para sempre: a chave dele cai no
     /// handshake e não pareia de novo. `false` se ele não existe.
     pub fn revogar(&self, dispositivo: IdDoDispositivo) -> Result<bool, FalhaDoBanco> {
-        let mudou = self.conexao.execute(
+        self.mudar_dispositivo(
+            dispositivo,
             "UPDATE dispositivo SET revogado = 1 WHERE id = ?1",
+            "revogacao",
+        )
+    }
+
+    /// O administrador desbloqueia: os erros seguidos voltam a zero. `false`
+    /// se o dispositivo não existe.
+    pub fn desbloquear(&self, dispositivo: IdDoDispositivo) -> Result<bool, FalhaDoBanco> {
+        self.mudar_dispositivo(
+            dispositivo,
+            "UPDATE dispositivo SET erros_seguidos = 0 WHERE id = ?1",
+            "desbloqueio",
+        )
+    }
+
+    /// Roda `sql` no dispositivo e registra `evento`, se ele existe.
+    fn mudar_dispositivo(
+        &self,
+        dispositivo: IdDoDispositivo,
+        sql: &str,
+        evento: &'static str,
+    ) -> Result<bool, FalhaDoBanco> {
+        let transacao = self.imediata()?;
+        if transacao.execute(sql, [dispositivo.0])? != 1 {
+            return Ok(false);
+        }
+        let usuario: i64 = transacao.query_row(
+            "SELECT usuario FROM dispositivo WHERE id = ?1",
             [dispositivo.0],
+            |l| l.get(0),
         )?;
-        Ok(mudou == 1)
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento,
+                usuario: Some(usuario),
+                dispositivo: Some(dispositivo.0),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
+        transacao.commit()?;
+        Ok(true)
     }
 
     /// Conta a tentativa como erro antes de o PIN ser conferido, a não ser que
@@ -499,9 +623,9 @@ impl Banco {
         dispositivo: IdDoDispositivo,
         limite: u32,
     ) -> Result<Reserva, FalhaDoBanco> {
-        // IMMEDIATE: outra conexão (a CLI) não lê o contador entre a leitura e
-        // a escrita desta.
-        let transacao = Transaction::new_unchecked(&self.conexao, TransactionBehavior::Immediate)?;
+        // Outra conexão (a CLI) não lê o contador entre a leitura e a escrita
+        // desta.
+        let transacao = self.imediata()?;
         let atual: Option<(i64, u32, String)> = transacao
             .query_row(
                 "SELECT d.usuario, d.erros_seguidos, u.pin
@@ -515,7 +639,9 @@ impl Banco {
             return Ok(Reserva::Desconhecido);
         };
         if erros_seguidos >= limite {
-            return Ok(Reserva::Bloqueado);
+            return Ok(Reserva::Bloqueado {
+                usuario: IdDoUsuario(usuario),
+            });
         }
         transacao.execute(
             "UPDATE dispositivo SET erros_seguidos = erros_seguidos + 1 WHERE id = ?1",
@@ -529,14 +655,61 @@ impl Banco {
         })
     }
 
-    /// Zera os erros seguidos: o PIN conferiu, ou o administrador desbloqueou.
-    /// `false` se o dispositivo não existe.
-    pub fn zerar_erros(&self, dispositivo: IdDoDispositivo) -> Result<bool, FalhaDoBanco> {
-        let mudou = self.conexao.execute(
-            "UPDATE dispositivo SET erros_seguidos = 0 WHERE id = ?1",
-            [dispositivo.0],
+    /// Registra uma tentativa de PIN pessoal. Aceita, zera os erros seguidos
+    /// na mesma transação.
+    pub(crate) fn registrar_entrada(
+        &self,
+        dispositivo: IdDoDispositivo,
+        usuario: IdDoUsuario,
+        resultado: &str,
+        aceita: bool,
+    ) -> Result<(), FalhaDoBanco> {
+        let transacao = self.imediata()?;
+        if aceita {
+            transacao.execute(
+                "UPDATE dispositivo SET erros_seguidos = 0 WHERE id = ?1",
+                [dispositivo.0],
+            )?;
+        }
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "entrada",
+                usuario: Some(usuario.0),
+                dispositivo: Some(dispositivo.0),
+                resultado: resultado.into(),
+                ..Lancamento::default()
+            },
         )?;
-        Ok(mudou == 1)
+        transacao.commit()?;
+        Ok(())
+    }
+
+    /// Registra uma assinatura que chegou ao token, com o resultado.
+    pub fn auditar_assinatura(&self, lancamento: &Lancamento) -> Result<(), FalhaDoBanco> {
+        let transacao = self.imediata()?;
+        auditoria::acrescentar(&transacao, lancamento)?;
+        transacao.commit()?;
+        Ok(())
+    }
+
+    /// As últimas `quantas` linhas da auditoria, da mais antiga para a mais
+    /// nova.
+    pub fn auditoria(&self, quantas: u32) -> Result<Vec<Linha>, FalhaDoBanco> {
+        auditoria::ultimas(&self.conexao, quantas)
+    }
+
+    pub fn verificar_auditoria(&self) -> Result<Verificacao, FalhaDoBanco> {
+        auditoria::verificar(&self.conexao)
+    }
+
+    /// Uma transação que já começa com a trava de escrita: a auditoria lê o
+    /// último selo e escreve o seguinte sem outra conexão no meio.
+    fn imediata(&self) -> Result<Transaction<'_>, FalhaDoBanco> {
+        Ok(Transaction::new_unchecked(
+            &self.conexao,
+            TransactionBehavior::Immediate,
+        )?)
     }
 
     pub fn identidade(&self) -> Result<Option<IdentidadeGuardada>, FalhaDoBanco> {
@@ -620,7 +793,7 @@ impl Banco {
         chave_publica: &[u8],
         agora: Instante,
     ) -> Result<Option<IdDoDispositivo>, FalhaDoBanco> {
-        let transacao = Transaction::new_unchecked(&self.conexao, TransactionBehavior::Immediate)?;
+        let transacao = self.imediata()?;
         transacao.execute("DELETE FROM pareamento WHERE expira <= ?1", [agora])?;
         let pendente: Option<(i64, String)> = transacao
             .query_row(
@@ -647,6 +820,16 @@ impl Banco {
             params![usuario, nome, chave_publica],
         )?;
         let dispositivo = IdDoDispositivo(transacao.last_insert_rowid());
+        auditoria::acrescentar(
+            &transacao,
+            &Lancamento {
+                evento: "pareamento",
+                usuario: Some(usuario),
+                dispositivo: Some(dispositivo.0),
+                resultado: "ok".into(),
+                ..Lancamento::default()
+            },
+        )?;
         transacao.commit()?;
         Ok(Some(dispositivo))
     }

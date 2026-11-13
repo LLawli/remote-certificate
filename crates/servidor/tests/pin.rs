@@ -138,7 +138,7 @@ fn o_bloqueio_e_do_dispositivo_e_so_o_administrador_desbloqueia() {
     );
 
     // O que a CLI faz em `dispositivo desbloquear`.
-    assert!(travar(&banco).zerar_erros(notebook).unwrap());
+    assert!(travar(&banco).desbloquear(notebook).unwrap());
     assert!(tentar(&banco, notebook, CERTO).is_ok());
 }
 
@@ -151,7 +151,7 @@ fn dispositivo_desconhecido_nao_e_atendido() {
         tentar(&banco, desconhecido, CERTO),
         Err(FalhaDoPin::DispositivoDesconhecido)
     ));
-    assert!(!travar(&banco).zerar_erros(desconhecido).unwrap());
+    assert!(!travar(&banco).desbloquear(desconhecido).unwrap());
 }
 
 /// Cada tentativa conta antes de o Argon2id rodar: uma rajada em paralelo

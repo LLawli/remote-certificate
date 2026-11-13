@@ -825,4 +825,37 @@ fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
             panic!("o token configurado de novo pede o OTP de uma sessão nova");
         }
     });
+
+    // Uma linha por assinatura, com o resumo do documento e nada secreto.
+    let linhas = travar(&banco).auditoria(1000).unwrap();
+    let assinaturas: Vec<_> = linhas.iter().filter(|l| l.evento == "assinatura").collect();
+    assert_eq!(
+        assinaturas
+            .iter()
+            .map(|l| l.resultado.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "assinada",
+            "assinada",
+            "cancelada",
+            "token_parado",
+            "assinada"
+        ]
+    );
+    let resumo = Sha256::digest(DOCUMENTO).to_vec();
+    for linha in &assinaturas {
+        assert_eq!(linha.resumo.as_deref(), Some(resumo.as_slice()));
+        assert_eq!(linha.usuario.as_deref(), Some("maria"));
+        assert_eq!(linha.token.as_deref(), Some("RemoteID"));
+        assert_eq!(linha.mecanismo.as_deref(), Some("CKM_SHA256_RSA_PKCS"));
+        assert!(linha.dispositivo.is_some() && linha.chave.is_some());
+    }
+    let tudo = format!("{linhas:?}");
+    for segredo in [PIN_PESSOAL, OTP, SENHA, "999999", "procuracao de teste"] {
+        assert!(!tudo.contains(segredo), "{segredo} na auditoria");
+    }
+    assert!(matches!(
+        travar(&banco).verificar_auditoria().unwrap(),
+        servidor::auditoria::Verificacao::Integra { .. }
+    ));
 }

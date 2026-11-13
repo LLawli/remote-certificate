@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::{Arc, Mutex};
 
+use data_encoding::HEXLOWER;
 use protocolo::Segredo;
 use rustix::termios::{self, LocalModes, OptionalActions};
+use servidor::auditoria::Verificacao;
 use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave, travar};
 use servidor::driver::{Conversa, Driver};
 use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
@@ -18,6 +20,8 @@ use servidor::recuperacao::{self, CodigoInvalido};
 use servidor::servico::{self, ENDERECO_PADRAO, Estado, VALIDADE_DO_PAREAMENTO};
 use servidor::token::{GuardaNoBanco, Token};
 use servidor::tokens::DRIVERS_PADRAO;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use zeroize::Zeroizing;
 
 const USO: &str = "\
@@ -42,7 +46,10 @@ uso: remote-certificate <comando>
                      mostra um código de pareamento de uso único
   dispositivo listar       [--banco <arquivo>] [--chave <arquivo>]
   dispositivo desbloquear <id> [--banco <arquivo>] [--chave <arquivo>]
-  dispositivo revogar <id> [--banco <arquivo>] [--chave <arquivo>]";
+  dispositivo revogar <id> [--banco <arquivo>] [--chave <arquivo>]
+  auditoria listar [--ultimas <n>] [--banco <arquivo>] [--chave <arquivo>]
+  auditoria verificar      [--banco <arquivo>] [--chave <arquivo>]
+                     refaz a corrente de selos e mostra o selo da última linha";
 
 /// Limpa a tela e o histórico do terminal, para o código não ficar ali.
 const LIMPAR_TERMINAL: &str = "\x1b[2J\x1b[3J\x1b[H";
@@ -76,6 +83,8 @@ fn main() -> ExitCode {
         ["token", "criar", nome, driver, resto @ ..] => criar_token(nome, driver, resto),
         ["token", "configurar", nome, resto @ ..] => configurar_token(nome, resto),
         ["token", "listar", resto @ ..] => listar_tokens(resto),
+        ["auditoria", "listar", resto @ ..] => listar_auditoria(resto),
+        ["auditoria", "verificar", resto @ ..] => verificar_auditoria(resto),
         _ => Err(USO.to_string()),
     };
     match resultado {
@@ -238,7 +247,7 @@ fn listar_dispositivos(resto: &[&str]) -> Result<(), String> {
 
 fn desbloquear(id: &str, resto: &[&str]) -> Result<(), String> {
     let id: IdDoDispositivo = id.parse().map_err(|_| USO.to_string())?;
-    if !abrir(resto)?.zerar_erros(id).map_err(|e| e.to_string())? {
+    if !abrir(resto)?.desbloquear(id).map_err(|e| e.to_string())? {
         return Err(format!("não há dispositivo {id}"));
     }
     println!("dispositivo {id} desbloqueado");
@@ -311,6 +320,60 @@ fn listar_tokens(resto: &[&str]) -> Result<(), String> {
         println!("{}\t{}\t{estado}", token.nome, token.driver);
     }
     Ok(())
+}
+
+/// Quantas linhas `auditoria listar` mostra sem `--ultimas`.
+const LINHAS_DA_AUDITORIA: &str = "50";
+
+fn listar_auditoria(resto: &[&str]) -> Result<(), String> {
+    let ultimas: u32 = opcao(resto, "--ultimas", LINHAS_DA_AUDITORIA)?
+        .parse()
+        .map_err(|_| USO.to_string())?;
+    let traco = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+    for linha in abrir(resto)?
+        .auditoria(ultimas)
+        .map_err(|e| e.to_string())?
+    {
+        let quando =
+            OffsetDateTime::from_unix_timestamp_nanos(i128::from(linha.quando_ms) * 1_000_000)
+                .ok()
+                .and_then(|q| q.format(&Rfc3339).ok())
+                .unwrap_or_else(|| linha.quando_ms.to_string());
+        println!(
+            "{}\t{quando}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            linha.id,
+            linha.evento,
+            traco(linha.usuario),
+            traco(linha.dispositivo.map(|d| d.to_string())),
+            traco(linha.token),
+            traco(linha.chave),
+            traco(linha.mecanismo),
+            traco(linha.resumo.map(|r| HEXLOWER.encode(&r))),
+            linha.resultado,
+        );
+    }
+    Ok(())
+}
+
+fn verificar_auditoria(resto: &[&str]) -> Result<(), String> {
+    match abrir(resto)?
+        .verificar_auditoria()
+        .map_err(|e| e.to_string())?
+    {
+        Verificacao::Integra {
+            linhas,
+            ultimo_selo,
+        } => {
+            println!(
+                "auditoria íntegra: {linhas} linhas, último selo {}",
+                HEXLOWER.encode(&ultimo_selo)
+            );
+            Ok(())
+        }
+        Verificacao::Quebrada { id } => Err(format!(
+            "a auditoria foi alterada por fora a partir da linha {id}"
+        )),
+    }
 }
 
 /// O PIN pessoal novo: num terminal, sem eco e duas vezes; fora dele, a

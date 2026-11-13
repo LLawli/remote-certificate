@@ -13,11 +13,13 @@ use std::thread;
 
 use protocolo::{Chave, Mecanismo};
 use rede::agente::ChaveDoToken;
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::auditoria::Lancamento;
 use crate::banco::{Banco, FalhaDoBanco, IdDoDispositivo, RegistroDoToken, travar};
 use crate::driver::{Driver, Falha};
-use crate::fatores::Pessoa;
+use crate::fatores::{Motivo, Pessoa};
 use crate::pin::Autenticado;
 use crate::token::{FalhaDoToken, GuardaNoBanco, Token};
 
@@ -160,9 +162,26 @@ impl Trabalhador {
                     mut pessoa,
                     resposta,
                 } => {
-                    let resultado = self.com_o_token(|token| {
+                    let mut resultado = self.com_o_token(|token| {
                         token.assinar(&quem, &chave, mecanismo, &dados, pessoa.as_mut())
                     });
+                    let lancamento = Lancamento {
+                        evento: "assinatura",
+                        usuario: Some(quem.usuario().0),
+                        dispositivo: Some(quem.dispositivo().0),
+                        token: Some(self.registro.nome.clone()),
+                        chave: Some(chave),
+                        mecanismo: serde_json::to_value(mecanismo)
+                            .ok()
+                            .and_then(|m| m.as_str().map(str::to_string)),
+                        resumo: Some(Sha256::digest(&dados).into()),
+                        resultado: resultado_da_assinatura(&resultado),
+                    };
+                    let auditada = travar(&self.banco).auditar_assinatura(&lancamento);
+                    // Nenhuma assinatura sai sem a linha dela na auditoria.
+                    if let (Ok(_), Err(falha)) = (&resultado, auditada) {
+                        resultado = Err(FalhaDoToken::Banco(falha));
+                    }
                     if let Err(FalhaDoToken::Desatualizado(_)) = resultado {
                         let _ = self
                             .eventos
@@ -203,5 +222,24 @@ impl Trabalhador {
             driver,
             GuardaNoBanco::novo(self.banco.clone(), self.registro.id),
         )?)
+    }
+}
+
+/// O resultado de uma assinatura como a auditoria guarda: um código estável,
+/// sem o texto do fornecedor.
+fn resultado_da_assinatura(resultado: &Result<Vec<u8>, FalhaDoToken>) -> String {
+    match resultado {
+        Ok(_) => "assinada".into(),
+        Err(FalhaDoToken::Desatualizado(_)) => "token_parado".into(),
+        Err(FalhaDoToken::Cancelado(Motivo::PessoaDesistiu | Motivo::RespostaIncompleta(_))) => {
+            "cancelada".into()
+        }
+        Err(FalhaDoToken::Cancelado(_)) => "recusada_pelo_servidor".into(),
+        Err(FalhaDoToken::Driver(Falha::Driver(erro))) => serde_json::to_value(erro.tipo)
+            .ok()
+            .and_then(|t| t.as_str().map(|t| format!("driver_{t}")))
+            .unwrap_or_else(|| "driver_outro".into()),
+        Err(FalhaDoToken::Driver(_)) => "driver_caiu".into(),
+        Err(FalhaDoToken::Banco(_)) => "erro_no_servidor".into(),
     }
 }

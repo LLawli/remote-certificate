@@ -118,7 +118,10 @@ pub fn conferir(
     let reserva = travar(banco).reservar_tentativa(dispositivo, ERROS_PARA_BLOQUEAR)?;
     let (usuario, guardado, erros_seguidos) = match reserva {
         Reserva::Desconhecido => return Err(FalhaDoPin::DispositivoDesconhecido),
-        Reserva::Bloqueado => return Err(FalhaDoPin::Bloqueado),
+        Reserva::Bloqueado { usuario } => {
+            travar(banco).registrar_entrada(dispositivo, usuario, "bloqueado", false)?;
+            return Err(FalhaDoPin::Bloqueado);
+        }
         Reserva::Contada {
             usuario,
             pin,
@@ -132,16 +135,18 @@ pub fn conferir(
             .is_ok()
     });
     if certo {
-        travar(banco).zerar_erros(dispositivo)?;
+        travar(banco).registrar_entrada(dispositivo, usuario, "aceita", true)?;
         return Ok(Autenticado {
             usuario,
             dispositivo,
         });
     }
-    match ERROS_PARA_BLOQUEAR.saturating_sub(erros_seguidos) {
-        0 => Err(FalhaDoPin::Bloqueado),
-        restantes => Err(FalhaDoPin::Errado { restantes }),
-    }
+    let (resultado, falha) = match ERROS_PARA_BLOQUEAR.saturating_sub(erros_seguidos) {
+        0 => ("pin_errado_bloqueou", FalhaDoPin::Bloqueado),
+        restantes => ("pin_errado", FalhaDoPin::Errado { restantes }),
+    };
+    travar(banco).registrar_entrada(dispositivo, usuario, resultado, false)?;
+    Err(falha)
 }
 
 #[cfg(test)]
