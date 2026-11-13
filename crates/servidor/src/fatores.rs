@@ -1,9 +1,9 @@
 //! Quem responde cada fator que um driver pede.
 //!
 //! Os fatores `guardado` saem do cofre do servidor e os `da_pessoa`, de quem
-//! pediu a operação. A pessoa nunca responde um fator guardado, e um token que
-//! recusou só fatores guardados não recebe outra tentativa: um token físico
-//! trava depois de poucas.
+//! pediu a operação. A pessoa nunca responde um fator guardado, e um fator
+//! guardado que o token pede de novo depois de uma recusa nunca é reenviado:
+//! um token físico trava depois de poucas tentativas.
 
 use std::collections::BTreeMap;
 
@@ -31,8 +31,8 @@ pub enum Motivo {
     FatorDesconhecido(String),
     /// O cofre não tem um fator guardado que o driver pediu.
     GuardadoAusente(String),
-    /// O token recusou e o novo pedido só tem fatores guardados: o segredo no
-    /// cofre está desatualizado, e tentar de novo só gastaria tentativas.
+    /// O token recusou e pede de novo estes fatores guardados: o segredo no
+    /// cofre está desatualizado, e reenviá-lo só gastaria tentativas.
     GuardadoRecusado(Vec<String>),
     PessoaDesistiu,
     /// A pessoa não respondeu todos os fatores pedidos.
@@ -55,7 +55,10 @@ pub fn decidir(
         }
     }
 
-    if pedido.recusa.is_some() && da_pessoa.is_empty() {
+    // Um driver só repete um fator guardado depois de uma recusa quando foi
+    // ele que o token recusou (docs/drivers.md), mesmo que peça também um da
+    // pessoa: o RemoteID pede o PIN e o OTP de novo quando o PIN não abre.
+    if pedido.recusa.is_some() && !guardados.is_empty() {
         let nomes = guardados.iter().map(|f| f.nome.clone()).collect();
         return Decisao::Cancelar(Motivo::GuardadoRecusado(nomes));
     }
@@ -231,11 +234,27 @@ mod testes {
     }
 
     #[test]
-    fn recusa_com_fator_da_pessoa_pergunta_de_novo_com_a_mensagem() {
+    fn guardado_pedido_de_novo_junto_com_o_da_pessoa_nao_e_reenviado() {
         let mut pessoa = Roteiro::novo(Some(mapa(&[("otp", "654321")])));
         let decisao = decidir(
             &declarados(),
-            &pedido(&["pin", "otp"], Some("PIN ou e-Token incorreto")),
+            &pedido(&["pin", "otp"], Some("PIN incorreto")),
+            &mapa(&[("pin", "4321")]),
+            &mut pessoa,
+        );
+        assert_eq!(
+            decisao,
+            Decisao::Cancelar(Motivo::GuardadoRecusado(vec!["pin".into()]))
+        );
+        assert!(pessoa.perguntas.is_empty());
+    }
+
+    #[test]
+    fn recusa_so_com_fator_da_pessoa_pergunta_de_novo_com_a_mensagem() {
+        let mut pessoa = Roteiro::novo(Some(mapa(&[("otp", "654321")])));
+        let decisao = decidir(
+            &declarados(),
+            &pedido(&["otp"], Some("PIN ou e-Token incorreto")),
             &mapa(&[("pin", "4321")]),
             &mut pessoa,
         );
