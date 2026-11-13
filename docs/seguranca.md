@@ -65,9 +65,13 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
 
 ### PIN pessoal
 
-- Guardado em Argon2id com os parâmetros padrão do crate `argon2` (19 MiB,
-  2 passadas, 1 via: o mínimo da OWASP), que ficam no próprio hash. Subir os
-  parâmetros depois não invalida os PINs guardados. De 4 a 64 caracteres.
+- Guardado em Argon2id com a segunda opção recomendada da RFC 9106: 64 MiB,
+  3 passadas, 4 vias. Medido em 2026-11-13 (Ryzen 7 5700U, release): 141 ms e
+  66 MiB por conferência, sem a feature `parallel` (com o rayon, 85 ms; não
+  compensa a dependência num login). A primeira opção da RFC, 2 GiB, levou
+  1,7 s e 2 GiB por conferência: alguns logins juntos derrubariam o container.
+  Os parâmetros ficam no próprio hash, então subi-los depois não invalida os
+  PINs guardados. De 4 a 64 caracteres.
 - A tentativa conta como erro antes de o hash ser conferido, numa transação
   `IMMEDIATE`, e o acerto zera o contador. Uma rajada de tentativas em paralelo
   não ganha mais de 3 chutes, nem com a CLI aberta noutra conexão, e uma queda

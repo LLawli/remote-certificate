@@ -8,9 +8,9 @@
 use std::fmt;
 use std::sync::Mutex;
 
-use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, Params, Version};
 use protocolo::Segredo;
 
 use crate::banco::{Banco, FalhaDoBanco, HashDoPin, IdDoDispositivo, IdDoUsuario, Reserva, travar};
@@ -19,6 +19,18 @@ pub const ERROS_PARA_BLOQUEAR: u32 = 3;
 /// Em caracteres.
 pub const TAMANHO_MINIMO: usize = 4;
 pub const TAMANHO_MAXIMO: usize = 64;
+
+/// A segunda opção recomendada da RFC 9106 (a primeira, de 2 GiB por
+/// conferência, não cabe num servidor com logins simultâneos). Em KiB.
+const MEMORIA: u32 = 64 * 1024;
+const PASSADAS: u32 = 3;
+const VIAS: u32 = 4;
+
+fn argon2id() -> Argon2<'static> {
+    let parametros =
+        Params::new(MEMORIA, PASSADAS, VIAS, None).expect("parâmetros da RFC 9106 são válidos");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, parametros)
+}
 
 /// A prova de que o PIN pessoal conferiu: só [`conferir`] cria uma.
 #[derive(Debug)]
@@ -83,16 +95,16 @@ impl From<FalhaDoBanco> for FalhaDoPin {
     }
 }
 
-/// O hash de um PIN novo, com sal aleatório e os parâmetros padrão do
-/// Argon2id (que ficam no próprio hash).
+/// O hash de um PIN novo, com sal aleatório. Os parâmetros ficam no próprio
+/// hash: a conferência usa os dele, então subi-los não invalida os antigos.
 pub fn hash(pin: &Segredo) -> Result<HashDoPin, FalhaDoPin> {
     let tamanho = pin.expor().chars().count();
     if !(TAMANHO_MINIMO..=TAMANHO_MAXIMO).contains(&tamanho) {
         return Err(FalhaDoPin::Tamanho);
     }
-    let hash = Argon2::default()
+    let hash = argon2id()
         .hash_password(pin.expor().as_bytes())
-        .expect("Argon2id com os parâmetros padrão e sal do sistema");
+        .expect("Argon2id com sal do sistema");
     Ok(HashDoPin(hash.to_string()))
 }
 
@@ -115,7 +127,7 @@ pub fn conferir(
     };
     // Um hash ilegível no banco falha fechado, como um PIN errado.
     let certo = PasswordHash::new(guardado.como_texto()).is_ok_and(|h| {
-        Argon2::default()
+        argon2id()
             .verify_password(pin.expor().as_bytes(), &h)
             .is_ok()
     });
@@ -140,7 +152,11 @@ mod testes {
     fn o_hash_e_argon2id_e_nao_traz_o_pin() {
         let pin = Segredo::novo("2468-pessoal".into());
         let hash = hash(&pin).unwrap();
-        assert!(hash.como_texto().starts_with("$argon2id$"), "{hash:?}");
+        assert!(
+            hash.como_texto()
+                .starts_with("$argon2id$v=19$m=65536,t=3,p=4$"),
+            "{hash:?}"
+        );
         assert!(!hash.como_texto().contains("2468"));
         assert_ne!(hash, super::hash(&pin).unwrap(), "o sal muda a cada hash");
     }
