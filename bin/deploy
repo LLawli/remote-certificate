@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Publica o servidor: constrói a imagem, envia ao registro e atualiza o host.
 # Lê REGISTRO, IMAGEM, HOST_SSH e CAMINHO_REMOTO de config/deploy.env.
+#
+#   bin/deploy                    constrói, envia e sobe a versão nova
+#   bin/deploy chave              uma vez por host: gera a chave do banco
+#                                 selada no TPM e mostra o código de recuperação
+#   bin/deploy chave --restaurar  num host novo: a chave vem do código
+#
+# Os dois `chave` pedem sudo no host e precisam de um terminal. No primeiro
+# deploy de um host, a ordem é: bin/deploy (publica a imagem e para pedindo a
+# chave), bin/deploy chave, bin/deploy. Um host sem TPM nem systemd pode usar
+# um arquivo comum: CHAVE=<arquivo 0400 do uid 10001> no .env do host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,9 +27,34 @@ tag=$(jj log -r @ --no-graph -T 'commit_id.short(12)' 2>/dev/null \
     || git rev-parse --short=12 HEAD)
 referencia="$REGISTRO/$IMAGEM"
 
+# Os arquivos do host vão junto a cada vez: o compose.yaml traz o
+# endurecimento do container, e deploy/ a receita da chave.
+copiar_para_o_host() {
+    # shellcheck disable=SC2029  # as variáveis expandem aqui de propósito
+    ssh "$HOST_SSH" "mkdir -p '$CAMINHO_REMOTO/deploy'"
+    scp -q compose.yaml "$HOST_SSH:$CAMINHO_REMOTO/"
+    scp -q deploy/chave.sh deploy/remote-certificate-chave.service \
+        "$HOST_SSH:$CAMINHO_REMOTO/deploy/"
+}
+
+if [[ ${1:-} == chave ]]; then
+    copiar_para_o_host
+    # shellcheck disable=SC2029
+    ssh -t "$HOST_SSH" "cd '$CAMINHO_REMOTO' && docker pull -q '$referencia:latest' >/dev/null \
+        && sudo deploy/chave.sh '$referencia:latest' ${2:-}"
+    exit
+fi
+
 docker build -t "$referencia:$tag" -t "$referencia:latest" .
 docker push "$referencia:$tag"
 docker push "$referencia:latest"
 
-# shellcheck disable=SC2029  # as variáveis expandem aqui de propósito
-ssh "$HOST_SSH" "cd '$CAMINHO_REMOTO' && IMAGEM='$referencia' TAG='$tag' docker compose pull && IMAGEM='$referencia' TAG='$tag' docker compose up -d"
+copiar_para_o_host
+# shellcheck disable=SC2029
+ssh "$HOST_SSH" "cd '$CAMINHO_REMOTO' \
+    && if ! systemctl is-active --quiet remote-certificate-chave.service \
+        && ! grep -q '^CHAVE=' .env 2>/dev/null; then \
+        echo 'falta a chave do banco: rode bin/deploy chave e depois bin/deploy de novo' >&2; \
+        exit 1; fi \
+    && IMAGEM='$referencia' TAG='$tag' docker compose pull \
+    && IMAGEM='$referencia' TAG='$tag' docker compose up -d"

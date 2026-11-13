@@ -41,18 +41,27 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   (uma consulta a `sqlite_schema` confere a chave).
 - Migração de esquema numa transação (o SQLite tem DDL transacional), com um
   backup verificado antes.
-- `umask 077`: nada em `/dados` é legível por outro usuário.
+- O banco e cada backup nascem com permissão `0600`.
 
 ### Chave do banco
 
 - Vem do secret do Docker (`/run/secrets/...`), lido uma vez na partida. Nunca
   passa por variável de ambiente nem argumento, que aparecem em `/proc`.
-- Em memória: `Box<[u8; 32]>` (endereço estável), com `mlock` (não vai para o
-  swap), `MADV_DONTDUMP` (fora de core dump) e `zeroize` no fim.
-- **Código de recuperação**: `remote-certificate iniciar` gera a chave, grava o
-  arquivo do secret com modo `0600` e mostra a chave uma vez, em Base32 com
-  dígito de conferência, pedindo para digitá-la de volta. Perder a chave perde
-  usuários, pareamentos e auditoria; os tokens se configuram de novo.
+- Em memória: numa página só dela (`crates/memoria`), com `mlock` (não vai
+  para o swap), `MADV_DONTDUMP` (fora de core dump) e zerada no fim. O arquivo
+  é lido direto para essa página.
+- **No host**: `bin/deploy chave` gera a chave no próprio host e a sela no TPM
+  com `systemd-creds` (`/etc/credstore.encrypted`). A cada boot, antes do
+  Docker, o `remote-certificate-chave.service` a abre em `/run` (tmpfs), de
+  onde o `compose.yaml` a entrega como secret. Em claro, ela só existe em RAM.
+  Copiar o disco do host não leva a chave junto. Sem TPM, a receita sela com a
+  chave do próprio host, o que só protege contra copiar o arquivo sozinho.
+- **Código de recuperação**: logo depois de gerar a chave, a receita roda
+  `remote-certificate recuperacao mostrar`, que mostra a chave uma vez, em
+  Base32 com conferência contra erro de digitação, pede para digitá-la de
+  volta e limpa o terminal. `bin/deploy chave --restaurar` sela no TPM de um
+  host novo a chave de um código. Perder a chave e o código perde usuários,
+  pareamentos e auditoria; os tokens se configuram de novo.
 
 ### Processo e container
 
@@ -129,9 +138,11 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
 
 - **Root no host**, ou quem está no grupo `docker`, lê a memória do servidor e
   o secret enquanto ele roda.
-- **O secret fica em disco no host.** Quem copia o volume e o arquivo do secret
-  lê tudo. Uma receita opcional de deploy pode guardar o secret selado no TPM do
-  host e abri-lo em `/run` (tmpfs) na partida.
+- **Quem controla o host ligado** abre a chave do TPM como o serviço abre. O
+  TPM protege o disco copiado ou roubado, não o host invadido.
+- **O `remoteid servir`** guarda a senha e o PIN da conta na memória dele e não
+  se marca como não depurável (o `execve` desfaz o que o driver marcou). Fica
+  para o RemoteID-linux aplicar o mesmo `PR_SET_DUMPABLE`.
 - **SSD e Btrfs** guardam blocos antigos: o que um dia foi gravado em claro
   pode sobreviver no disco. Por isso nada é gravado em claro, nem uma vez.
 - **Captura de tela**: na estação, um programa do mesmo usuário pode capturar a

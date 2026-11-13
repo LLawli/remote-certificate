@@ -1,0 +1,22 @@
+# Abre a chave do banco, selada no TPM deste host, num arquivo em /run (tmpfs)
+# que o compose.yaml entrega ao container como secret. Roda antes do Docker,
+# que sobe o container sozinho no boot. Instalado por `bin/deploy chave`.
+[Unit]
+Description=Chave do banco do remote-certificate, aberta do TPM
+Before=docker.service
+ConditionPathExists=/etc/credstore.encrypted/remote-certificate-chave.cred
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+UMask=0077
+# Some quando o serviço para.
+RuntimeDirectory=remote-certificate
+RuntimeDirectoryMode=0700
+ExecStart=systemd-creds decrypt --name=remote-certificate-chave /etc/credstore.encrypted/remote-certificate-chave.cred /run/remote-certificate/chave
+# O usuário do container (Dockerfile) lê; mais ninguém.
+ExecStart=chown 10001:10001 /run/remote-certificate/chave
+ExecStart=chmod 0400 /run/remote-certificate/chave
+
+[Install]
+WantedBy=docker.service

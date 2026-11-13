@@ -15,5 +15,18 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   `CKM_SHA384_RSA_PKCS` e `CKM_SHA512_RSA_PKCS`, pedindo o OTP a quem assina.
   Exige o `remoteid` 0.5.1 ou mais novo e avisa quando o instalado é anterior.
 - O servidor responde os fatores guardados (PIN e senha) sem que ninguém os
-  conheça, e para o token, sem nova tentativa, quando o token recusa um deles.
+  conheça, e para o token, sem nova tentativa, quando o token recusa um deles,
+  mesmo que o token peça junto um fator da pessoa. O token parado continua
+  parado depois de o servidor reiniciar.
+- Banco SQLite cifrado inteiro com SQLCipher, com a chave num secret do
+  Docker, travada na RAM. Guarda os tokens e os fatores guardados; recusa
+  abrir um banco em claro.
+- `remote-certificate backup`: cópia com o serviço rodando, conferida contra
+  o banco antes de dar certo.
+- `remote-certificate recuperacao`: o código de recuperação da chave do banco.
+- `bin/deploy chave`: gera a chave do banco no host, selada no TPM, e a abre
+  em `/run` a cada boot.
+- O servidor e o driver RemoteID não se deixam inspecionar por outro processo
+  nem deixam core dump; o container roda só leitura e sem capabilities.
+- Uma linha do contrato de driver tem no máximo 1 MiB.
 - Imagem de container do servidor, ainda sem a API.

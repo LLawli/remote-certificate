@@ -1,10 +1,26 @@
+# O servidor endurecido (docs/seguranca.md). IMAGEM aponta para a imagem com
+# os drivers que este escritório usa.
 services:
   remote-certificate:
     image: ${IMAGEM:-remote-certificate}:${TAG:-latest}
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    secrets:
+      - remote-certificate-chave
     volumes:
       - dados:/dados
-      - ./drivers:/drivers:ro
+
+secrets:
+  # Aberta pelo remote-certificate-chave.service a partir do TPM do host
+  # (bin/deploy chave). Sem TPM, aponte CHAVE para um arquivo 0400 do uid 10001.
+  remote-certificate-chave:
+    file: ${CHAVE:-/run/remote-certificate/chave}
 
 volumes:
   dados:
