@@ -90,6 +90,20 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   `security_opt: [no-new-privileges:true]`, `ulimits: {core: 0}`, `tmpfs` só
   onde precisa, usuário não root (já é).
 
+### Conexões
+
+- Só TLS 1.3 e só chaves P-256, dos dois lados (`crates/rede`). O servidor
+  consulta o banco no handshake: chave que não é de dispositivo pareado cai
+  ali, antes de qualquer HTTP (ameaça 5).
+- Um handshake tem 10 segundos para terminar.
+- Com um código de pareamento pendente, qualquer chave termina o handshake,
+  mas só alcança `POST /v1/pareamento`, e sem o segredo não vira dispositivo.
+  O segredo tem 80 bits e vale por 10 minutos, uma vez; o banco guarda o
+  SHA-256 dele.
+- Um código vazado deixa alguém parear no lugar da pessoa, dentro do prazo. O
+  dispositivo dele ainda depende do PIN pessoal dela, e o administrador vê o
+  dispositivo a mais em `dispositivo listar`.
+
 ### Mensagens de fora
 
 Toda linha e mensagem que chega tem tamanho máximo, com constante nomeada: o

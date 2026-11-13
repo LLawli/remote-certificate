@@ -92,6 +92,24 @@ cliente fixa a do servidor. Uma conexão de chave desconhecida é recusada antes
 de qualquer operação, então uma URL vazada, sozinha, não serve para nada, mesmo
 com o servidor na internet.
 
+- O código (`remote-certificate dispositivo parear <usuario> <nome>`) traz os
+  primeiros 128 bits do SHA-256 da chave do servidor e um segredo de 80 bits,
+  no formato `RP1-XXXX-...` (`crates/rede`). Vale uma vez, por 10 minutos, e o
+  banco guarda só o SHA-256 do segredo.
+- O cliente conecta aceitando só um servidor cuja chave confere com o código e
+  manda o segredo por essa conexão (`POST /v1/pareamento`). Quem está no meio
+  não se passa pelo servidor, e ninguém precisa de outra criptografia além do
+  TLS com certificado de cliente, que qualquer linguagem tem. Depois, o cliente
+  fixa a impressão inteira.
+- Enquanto há um código pendente, o handshake aceita uma chave nova, que só
+  alcança `POST /v1/pareamento`. Sem código pendente, chave desconhecida cai no
+  handshake.
+- O dispositivo nasce do usuário e com o nome que o administrador deu ao gerar
+  o código.
+- Ficou de fora um PAKE (SPAKE2, CPace) com código curto: cada sistema
+  integrado precisaria de uma biblioteca de PAKE, pelo mesmo motivo que tirou o
+  Noise. O preço é um código de uns 60 caracteres, para copiar e colar.
+
 ### Transporte
 
 mTLS (TLS 1.3) dos dois lados, sem autoridade certificadora: o certificado de
@@ -210,8 +228,10 @@ aceito aqui.
 
 ## Decisões tomadas
 
-- **Transporte**: mTLS com chaves fixadas, WebSocket para o agente; exposição
-  recomendada pelo Tailscale.
+- **Transporte**: mTLS 1.3 com chaves P-256 fixadas (rustls, sem OpenSSL),
+  WebSocket para o agente; exposição recomendada pelo Tailscale, na porta 8443.
+- **Pareamento**: código com a impressão da chave do servidor e um segredo de
+  uso único, sem PAKE.
 - **Chave do banco**: secret do Docker. O servidor não prevê rodar fora de
   container. O desbloqueio pelo administrador a cada partida ficou de fora:
   deixaria o serviço parado depois de toda queda até alguém aparecer.

@@ -13,16 +13,29 @@ path = "src/main.rs"
 
 [dependencies]
 argon2 = { version = "0.6", features = ["zeroize"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 data-encoding = "2"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 memoria.workspace = true
 protocolo.workspace = true
+rede.workspace = true
 rustix = { version = "1", features = ["termios"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # SQLCipher com o OpenSSL compilado junto: a imagem final não precisa de libssl.
 rusqlite = { version = "0.42", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

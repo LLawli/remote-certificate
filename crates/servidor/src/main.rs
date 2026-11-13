@@ -4,20 +4,23 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use protocolo::Segredo;
 use rustix::termios::{self, LocalModes, OptionalActions};
-use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave};
+use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave, travar};
 use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
 use servidor::recuperacao::{self, CodigoInvalido};
+use servidor::servico::{self, ENDERECO_PADRAO, VALIDADE_DO_PAREAMENTO};
 use zeroize::Zeroizing;
 
 const USO: &str = "\
 uso: remote-certificate <comando>
 
   versao
+  servir [--endereco <ip:porta>] [--banco <arquivo>] [--chave <arquivo>]
   backup <destino> [--banco <arquivo>] [--chave <arquivo>]
                      copia o banco com o serviço rodando e confere a cópia
   recuperacao mostrar [--chave <arquivo>]
@@ -27,6 +30,8 @@ uso: remote-certificate <comando>
   usuario criar <nome>     [--banco <arquivo>] [--chave <arquivo>]
   usuario pin <nome>       [--banco <arquivo>] [--chave <arquivo>]
                      o PIN pessoal vem do stdin (pedido duas vezes num terminal)
+  dispositivo parear <usuario> <nome> [--banco <arquivo>] [--chave <arquivo>]
+                     mostra um código de pareamento de uso único
   dispositivo listar       [--banco <arquivo>] [--chave <arquivo>]
   dispositivo desbloquear <id> [--banco <arquivo>] [--chave <arquivo>]";
 
@@ -49,11 +54,13 @@ fn main() -> ExitCode {
             );
             Ok(())
         }
+        ["servir", resto @ ..] => servir(resto),
         ["backup", destino, resto @ ..] => backup(destino, resto),
         ["recuperacao", "mostrar", resto @ ..] => mostrar(resto),
         ["recuperacao", "restaurar"] => restaurar(),
         ["usuario", "criar", nome, resto @ ..] => criar_usuario(nome, resto),
         ["usuario", "pin", nome, resto @ ..] => trocar_pin(nome, resto),
+        ["dispositivo", "parear", usuario, nome, resto @ ..] => parear(usuario, nome, resto),
         ["dispositivo", "listar", resto @ ..] => listar_dispositivos(resto),
         ["dispositivo", "desbloquear", id, resto @ ..] => desbloquear(id, resto),
         _ => Err(USO.to_string()),
@@ -68,7 +75,7 @@ fn main() -> ExitCode {
 }
 
 /// O valor de `--nome` nas opções, ou o padrão.
-fn opcao(resto: &[&str], nome: &str, padrao: &str) -> Result<PathBuf, String> {
+fn opcao<'a>(resto: &[&'a str], nome: &str, padrao: &'a str) -> Result<&'a str, String> {
     let mut valor = padrao;
     let mut opcoes = resto.iter();
     while let Some(opcao) = opcoes.next() {
@@ -78,13 +85,45 @@ fn opcao(resto: &[&str], nome: &str, padrao: &str) -> Result<PathBuf, String> {
             _ => return Err(USO.to_string()),
         }
     }
-    Ok(PathBuf::from(valor))
+    Ok(valor)
 }
 
 /// O banco de `--banco`, aberto com a chave de `--chave`.
 fn abrir(resto: &[&str]) -> Result<Banco, String> {
-    let chave = ler_chave(&opcao(resto, "--chave", CHAVE_PADRAO)?).map_err(|e| e.to_string())?;
-    Banco::abrir(&opcao(resto, "--banco", BANCO_PADRAO)?, chave).map_err(|e| e.to_string())
+    let chave =
+        ler_chave(Path::new(opcao(resto, "--chave", CHAVE_PADRAO)?)).map_err(|e| e.to_string())?;
+    Banco::abrir(Path::new(opcao(resto, "--banco", BANCO_PADRAO)?), chave)
+        .map_err(|e| e.to_string())
+}
+
+fn servir(resto: &[&str]) -> Result<(), String> {
+    let endereco = opcao(resto, "--endereco", ENDERECO_PADRAO)?;
+    let banco = Arc::new(Mutex::new(abrir(resto)?));
+    let execucao = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    execucao.block_on(async {
+        let ouvinte = tokio::net::TcpListener::bind(endereco)
+            .await
+            .map_err(|e| format!("{endereco}: {e}"))?;
+        eprintln!("remote-certificate atendendo em {endereco}");
+        servico::servir(ouvinte, banco)
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+fn parear(usuario: &str, nome: &str, resto: &[&str]) -> Result<(), String> {
+    let banco = Mutex::new(abrir(resto)?);
+    let id = travar(&banco)
+        .usuario(usuario)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("não há usuário {usuario}"))?;
+    let codigo = servico::novo_pareamento(&banco, id, nome).map_err(|e| e.to_string())?;
+    println!("{}", codigo.as_str());
+    eprintln!(
+        "vale uma vez, por {} minutos",
+        VALIDADE_DO_PAREAMENTO.as_secs() / 60
+    );
+    Ok(())
 }
 
 fn backup(destino: &str, resto: &[&str]) -> Result<(), String> {
@@ -99,7 +138,8 @@ fn mostrar(resto: &[&str]) -> Result<(), String> {
     if !io::stdout().is_terminal() {
         return Err("o código de recuperação só aparece num terminal".into());
     }
-    let chave = ler_chave(&opcao(resto, "--chave", CHAVE_PADRAO)?).map_err(|e| e.to_string())?;
+    let chave =
+        ler_chave(Path::new(opcao(resto, "--chave", CHAVE_PADRAO)?)).map_err(|e| e.to_string())?;
     let codigo = recuperacao::codigo(&chave);
     println!(
         "Código de recuperação da chave do banco:\n\n  {}\n",

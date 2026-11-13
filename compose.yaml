@@ -15,6 +15,10 @@ services:
       - remote-certificate-chave
     volumes:
       - dados:/dados
+    # Com Tailscale, PUBLICAR=<IP do host na tailnet>:8443 deixa a porta só na
+    # tailnet. O TLS chega inteiro ao servidor: um proxy no meio só repassa.
+    ports:
+      - ${PUBLICAR:-8443}:8443
 
 secrets:
   # Aberta pelo remote-certificate-chave.service a partir do TPM do host

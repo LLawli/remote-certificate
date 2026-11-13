@@ -23,4 +23,6 @@ RUN apt-get update \
 COPY --from=build /out/remote-certificate /usr/local/bin/remote-certificate
 USER certificado
 VOLUME ["/dados"]
+EXPOSE 8443
 ENTRYPOINT ["/usr/local/bin/remote-certificate"]
+CMD ["servir"]

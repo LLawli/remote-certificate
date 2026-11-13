@@ -73,6 +73,19 @@ const MIGRACOES: &[&str] = &[
         erros_seguidos INTEGER NOT NULL DEFAULT 0
     ) STRICT;
 ",
+    "
+    CREATE TABLE identidade (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        certificado BLOB NOT NULL,
+        chave BLOB NOT NULL
+    ) STRICT;
+    CREATE TABLE pareamento (
+        segredo BLOB PRIMARY KEY,
+        usuario INTEGER NOT NULL REFERENCES usuario (id),
+        nome TEXT NOT NULL,
+        expira INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 #[derive(Debug)]
@@ -178,6 +191,15 @@ pub struct RegistroDoDispositivo {
     pub nome: String,
     pub erros_seguidos: u32,
 }
+
+/// O certificado e a chave PKCS#8 do servidor.
+pub struct IdentidadeGuardada {
+    pub certificado: Vec<u8>,
+    pub chave: Zeroizing<Vec<u8>>,
+}
+
+/// Segundos desde 1970, como o banco guarda prazos.
+pub type Instante = i64;
 
 /// Uma tentativa de PIN pessoal, já contada.
 #[derive(Debug)]
@@ -455,6 +477,118 @@ impl Banco {
             [dispositivo.0],
         )?;
         Ok(mudou == 1)
+    }
+
+    pub fn identidade(&self) -> Result<Option<IdentidadeGuardada>, FalhaDoBanco> {
+        Ok(self
+            .conexao
+            .query_row(
+                "SELECT certificado, chave FROM identidade WHERE id = 1",
+                [],
+                |l| {
+                    Ok(IdentidadeGuardada {
+                        certificado: l.get(0)?,
+                        chave: Zeroizing::new(l.get(1)?),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Grava a identidade do servidor. Uma vez gravada, nunca muda: os
+    /// clientes fixaram a chave dela.
+    pub fn gravar_identidade(&self, identidade: &IdentidadeGuardada) -> Result<(), FalhaDoBanco> {
+        self.conexao.execute(
+            "INSERT INTO identidade (id, certificado, chave) VALUES (1, ?1, ?2)",
+            params![identidade.certificado, identidade.chave.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Um pareamento pendente para `usuario`, até `expira`. `segredo` é o
+    /// SHA-256 do segredo do código: o banco não guarda o código.
+    pub fn criar_pareamento(
+        &self,
+        segredo: &[u8; 32],
+        usuario: IdDoUsuario,
+        nome: &str,
+        expira: Instante,
+    ) -> Result<(), FalhaDoBanco> {
+        self.conexao.execute(
+            "INSERT INTO pareamento (segredo, usuario, nome, expira) VALUES (?1, ?2, ?3, ?4)",
+            params![segredo.as_slice(), usuario.0, nome, expira],
+        )?;
+        Ok(())
+    }
+
+    /// Se a chave é de um dispositivo pareado, ou se há algum pareamento
+    /// pendente que ainda não venceu.
+    pub fn deixa_entrar(
+        &self,
+        chave_publica: &[u8],
+        agora: Instante,
+    ) -> Result<bool, FalhaDoBanco> {
+        Ok(self.conexao.query_row(
+            "SELECT EXISTS (SELECT 1 FROM dispositivo WHERE chave_publica = ?1)
+                 OR EXISTS (SELECT 1 FROM pareamento WHERE expira > ?2)",
+            params![chave_publica, agora],
+            |l| l.get(0),
+        )?)
+    }
+
+    pub fn dispositivo_da_chave(
+        &self,
+        chave_publica: &[u8],
+    ) -> Result<Option<IdDoDispositivo>, FalhaDoBanco> {
+        Ok(self
+            .conexao
+            .query_row(
+                "SELECT id FROM dispositivo WHERE chave_publica = ?1",
+                [chave_publica],
+                |l| l.get(0).map(IdDoDispositivo),
+            )
+            .optional()?)
+    }
+
+    /// Gasta o pareamento do segredo e cria o dispositivo com a chave, numa
+    /// transação só. `None` se o segredo não tem pareamento pendente (usado,
+    /// vencido ou errado) ou se a chave já é de um dispositivo. Os vencidos
+    /// somem aqui.
+    pub fn usar_pareamento(
+        &self,
+        segredo: &[u8; 32],
+        chave_publica: &[u8],
+        agora: Instante,
+    ) -> Result<Option<IdDoDispositivo>, FalhaDoBanco> {
+        let transacao = Transaction::new_unchecked(&self.conexao, TransactionBehavior::Immediate)?;
+        transacao.execute("DELETE FROM pareamento WHERE expira <= ?1", [agora])?;
+        let pendente: Option<(i64, String)> = transacao
+            .query_row(
+                "SELECT usuario, nome FROM pareamento WHERE segredo = ?1",
+                [segredo.as_slice()],
+                |l| Ok((l.get(0)?, l.get(1)?)),
+            )
+            .optional()?;
+        let ja_pareada: bool = transacao.query_row(
+            "SELECT EXISTS (SELECT 1 FROM dispositivo WHERE chave_publica = ?1)",
+            [chave_publica],
+            |l| l.get(0),
+        )?;
+        let Some((usuario, nome)) = pendente.filter(|_| !ja_pareada) else {
+            transacao.commit()?;
+            return Ok(None);
+        };
+        transacao.execute(
+            "DELETE FROM pareamento WHERE segredo = ?1",
+            [segredo.as_slice()],
+        )?;
+        transacao.execute(
+            "INSERT INTO dispositivo (usuario, nome, chave_publica) VALUES (?1, ?2, ?3)",
+            params![usuario, nome, chave_publica],
+        )?;
+        let dispositivo = IdDoDispositivo(transacao.last_insert_rowid());
+        transacao.commit()?;
+        Ok(Some(dispositivo))
     }
 
     /// Copia o banco para `destino`, que não pode existir, com o serviço

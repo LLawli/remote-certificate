@@ -6,4 +6,5 @@ pub mod driver;
 pub mod fatores;
 pub mod pin;
 pub mod recuperacao;
+pub mod servico;
 pub mod token;

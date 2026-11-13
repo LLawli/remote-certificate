@@ -32,6 +32,14 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   depois de o PIN pessoal conferir, e o PIN pessoal nunca chega ao token.
 - `remote-certificate usuario criar|pin` e
   `remote-certificate dispositivo listar|desbloquear`.
+- `remote-certificate servir`: o serviço na porta 8443, em mTLS 1.3 com
+  chaves fixadas dos dois lados. Uma chave que não é de dispositivo pareado cai
+  no handshake.
+- `remote-certificate dispositivo parear <usuario> <nome>`: um código de
+  pareamento de uso único, que vale por 10 minutos e traz a impressão da chave
+  do servidor.
+- O container sobe com `servir`; `PUBLICAR` escolhe onde a porta aparece no
+  host (o IP da tailnet, por exemplo).
 - O servidor e o driver RemoteID não se deixam inspecionar por outro processo
   nem deixam core dump; o container roda só leitura e sem capabilities.
 - Uma linha do contrato de driver tem no máximo 1 MiB.
