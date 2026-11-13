@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocolo", "crates/servidor", "drivers/remoteid"]
+members = ["crates/memoria", "crates/protocolo", "crates/servidor", "drivers/remoteid"]
 # O clone do RemoteID-linux que scripts/remoteid.sh faz é um projeto à parte.
 exclude = ["target/deps"]
 
@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
+memoria = { path = "crates/memoria" }
 protocolo = { path = "crates/protocolo" }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -15,6 +15,7 @@ path = "src/main.rs"
 protocolo.workspace = true
 base64.workspace = true
 getrandom = { version = "0.3", features = ["std"] }
+memoria.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
 

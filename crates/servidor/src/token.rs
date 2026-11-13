@@ -3,11 +3,66 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use protocolo::{Chave, Mecanismo, Segredo};
 
+use crate::banco::{Banco, FalhaDoBanco, IdDoToken};
 use crate::driver::{Conversa, Driver, Falha};
 use crate::fatores::{Decisao, Motivo, Pessoa, a_guardar, decidir};
+
+/// O que a guarda tem de um token.
+pub struct Guardado {
+    pub cofre: BTreeMap<String, Segredo>,
+    /// Os fatores guardados que o token recusou, se ele está parado.
+    pub desatualizado: Option<Vec<String>>,
+}
+
+/// Onde o token guarda o cofre e se está parado. Grava antes de o token
+/// responder: um token parado continua parado depois de o servidor reiniciar.
+pub trait Guarda {
+    fn carregar(&mut self) -> Result<Guardado, FalhaDoBanco>;
+    /// O cofre novo, e o token liberado.
+    fn configurado(&mut self, cofre: &BTreeMap<String, Segredo>) -> Result<(), FalhaDoBanco>;
+    /// O token recusou estes fatores guardados.
+    fn desatualizado(&mut self, nomes: &[String]) -> Result<(), FalhaDoBanco>;
+}
+
+/// A [`Guarda`] de um token no banco do servidor.
+pub struct GuardaNoBanco {
+    banco: Arc<Mutex<Banco>>,
+    token: IdDoToken,
+}
+
+impl GuardaNoBanco {
+    pub fn novo(banco: Arc<Mutex<Banco>>, token: IdDoToken) -> GuardaNoBanco {
+        GuardaNoBanco { banco, token }
+    }
+
+    fn banco(&self) -> std::sync::MutexGuard<'_, Banco> {
+        // Um pânico com o banco na mão não deixa transação aberta (o SQLite
+        // desfaz a que não terminou), então o banco continua usável.
+        self.banco.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Guarda for GuardaNoBanco {
+    fn carregar(&mut self) -> Result<Guardado, FalhaDoBanco> {
+        let banco = self.banco();
+        Ok(Guardado {
+            cofre: banco.cofre(self.token)?,
+            desatualizado: banco.desatualizado(self.token)?,
+        })
+    }
+
+    fn configurado(&mut self, cofre: &BTreeMap<String, Segredo>) -> Result<(), FalhaDoBanco> {
+        self.banco().configurado(self.token, cofre)
+    }
+
+    fn desatualizado(&mut self, nomes: &[String]) -> Result<(), FalhaDoBanco> {
+        self.banco().marcar_desatualizado(self.token, nomes)
+    }
+}
 
 #[derive(Debug)]
 pub enum FalhaDoToken {
@@ -17,6 +72,8 @@ pub enum FalhaDoToken {
     Desatualizado(Vec<String>),
     /// O servidor desistiu antes do token decidir.
     Cancelado(Motivo),
+    /// O banco não gravou; o token não muda de estado sem gravar.
+    Banco(FalhaDoBanco),
 }
 
 impl fmt::Display for FalhaDoToken {
@@ -29,6 +86,7 @@ impl fmt::Display for FalhaDoToken {
                 nomes.join(", ")
             ),
             FalhaDoToken::Cancelado(motivo) => write!(f, "cancelado: {motivo:?}"),
+            FalhaDoToken::Banco(falha) => falha.fmt(f),
         }
     }
 }
@@ -39,19 +97,32 @@ impl From<Falha> for FalhaDoToken {
     }
 }
 
-pub struct Token<C: Conversa = Driver> {
+impl From<FalhaDoBanco> for FalhaDoToken {
+    fn from(falha: FalhaDoBanco) -> FalhaDoToken {
+        FalhaDoToken::Banco(falha)
+    }
+}
+
+pub struct Token<C: Conversa = Driver, G: Guarda = GuardaNoBanco> {
     driver: C,
+    guarda: G,
     cofre: BTreeMap<String, Segredo>,
     desatualizado: Option<Vec<String>>,
 }
 
-impl<C: Conversa> Token<C> {
-    pub fn novo(driver: C, cofre: BTreeMap<String, Segredo>) -> Token<C> {
-        Token {
-            driver,
+impl<C: Conversa, G: Guarda> Token<C, G> {
+    /// O token com o cofre e o estado que a guarda tem.
+    pub fn abrir(driver: C, mut guarda: G) -> Result<Token<C, G>, FalhaDoBanco> {
+        let Guardado {
             cofre,
-            desatualizado: None,
-        }
+            desatualizado,
+        } = guarda.carregar()?;
+        Ok(Token {
+            driver,
+            guarda,
+            cofre,
+            desatualizado,
+        })
     }
 
     pub fn driver(&self) -> &C {
@@ -61,7 +132,9 @@ impl<C: Conversa> Token<C> {
     /// Prepara o token e troca o cofre pelo que a configuração deixou.
     pub fn configurar(&mut self, valores: BTreeMap<String, Segredo>) -> Result<(), FalhaDoToken> {
         let gerados = self.driver.configurar(valores.clone())?.guardar;
-        self.cofre = a_guardar(&self.driver.apresentacao().fatores, &valores, gerados);
+        let cofre = a_guardar(&self.driver.apresentacao().fatores, &valores, gerados);
+        self.guarda.configurado(&cofre)?;
+        self.cofre = cofre;
         self.desatualizado = None;
         Ok(())
     }
@@ -100,7 +173,10 @@ impl<C: Conversa> Token<C> {
         match (resultado, motivo) {
             (Ok(assinatura), _) => Ok(assinatura),
             (Err(_), Some(Motivo::GuardadoRecusado(nomes))) => {
+                // Parado na memória mesmo que o banco falhe: nesta vida do
+                // processo o token não recebe outra tentativa.
                 self.desatualizado = Some(nomes.clone());
+                self.guarda.desatualizado(&nomes)?;
                 Err(FalhaDoToken::Desatualizado(nomes))
             }
             (Err(_), Some(motivo)) => Err(FalhaDoToken::Cancelado(motivo)),
@@ -187,6 +263,40 @@ mod testes {
         }
     }
 
+    /// Uma guarda que só lembra, como o banco faria.
+    #[derive(Default)]
+    struct EmMemoria {
+        cofre: BTreeMap<String, Segredo>,
+        desatualizado: Option<Vec<String>>,
+    }
+
+    impl Guarda for &mut EmMemoria {
+        fn carregar(&mut self) -> Result<Guardado, FalhaDoBanco> {
+            Ok(Guardado {
+                cofre: self.cofre.clone(),
+                desatualizado: self.desatualizado.clone(),
+            })
+        }
+
+        fn configurado(&mut self, cofre: &BTreeMap<String, Segredo>) -> Result<(), FalhaDoBanco> {
+            self.cofre = cofre.clone();
+            self.desatualizado = None;
+            Ok(())
+        }
+
+        fn desatualizado(&mut self, nomes: &[String]) -> Result<(), FalhaDoBanco> {
+            self.desatualizado = Some(nomes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn guardado(pin: &str) -> EmMemoria {
+        EmMemoria {
+            cofre: cofre(pin),
+            desatualizado: None,
+        }
+    }
+
     struct Ninguem;
 
     impl Pessoa for Ninguem {
@@ -201,14 +311,16 @@ mod testes {
 
     #[test]
     fn pin_guardado_certo_assina_sem_perguntar_a_ninguem() {
-        let mut token = Token::novo(TokenComPin::novo("4321"), cofre("4321"));
+        let mut guarda = guardado("4321");
+        let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
         let assinatura = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
         assert_eq!(assinatura.unwrap(), [1]);
     }
 
     #[test]
     fn pin_guardado_errado_gasta_uma_tentativa_e_para_o_token() {
-        let mut token = Token::novo(TokenComPin::novo("4321"), cofre("0000"));
+        let mut guarda = guardado("0000");
+        let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
 
         let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
         assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(ref n)) if n == &["pin"]));
@@ -218,11 +330,23 @@ mod testes {
         let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
         assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(_))));
         assert_eq!(token.driver().tentativas, 1);
+
+        // Nem depois de o servidor reiniciar: a guarda lembra.
+        drop(token);
+        assert_eq!(
+            guarda.desatualizado.as_deref(),
+            Some(&["pin".to_string()][..])
+        );
+        let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
+        let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(_))));
+        assert_eq!(token.driver().tentativas, 0);
     }
 
     #[test]
     fn configurar_de_novo_libera_o_token() {
-        let mut token = Token::novo(TokenComPin::novo("4321"), cofre("0000"));
+        let mut guarda = guardado("0000");
+        let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
         assert!(
             token
                 .assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem)

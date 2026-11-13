@@ -5,10 +5,12 @@
 //! stdin e pelo stdout do driver. O formato completo está em `docs/drivers.md`.
 
 mod b64;
+mod linha;
 mod mecanismo;
 mod mensagem;
 mod segredo;
 
+pub use linha::{LINHA_MAXIMA, ler_linha};
 pub use mecanismo::{Mecanismo, suporta_tls13};
 pub use mensagem::{
     Apresentacao, Assinatura, Campo, Chave, Configurado, Erro, Fator, Listagem, MensagemDoDriver,

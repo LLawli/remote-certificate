@@ -9,14 +9,16 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use protocolo::{Chave, Fator, Mecanismo, Segredo, TipoDeErro};
 use rsa::PublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePublicKey;
+use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave};
 use servidor::driver::{Conversa, Driver, Falha};
 use servidor::fatores::{Motivo, Pessoa};
-use servidor::token::{FalhaDoToken, Token};
+use servidor::token::{FalhaDoToken, GuardaNoBanco, Token};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::Certificate;
@@ -105,8 +107,38 @@ fn valores(email: &str, senha: &str) -> BTreeMap<String, Segredo> {
     ])
 }
 
+/// O banco do servidor no diretório do teste, com a chave num arquivo como o
+/// secret do Docker. Abrir de novo é o servidor reiniciando.
+fn banco(dir: &Path) -> Arc<Mutex<Banco>> {
+    let arquivo = dir.join("chave");
+    if !arquivo.exists() {
+        let chave = ChaveDoBanco::aleatorio().unwrap();
+        std::fs::write(&arquivo, chave.expor()).unwrap();
+    }
+    let banco = Banco::abrir(&dir.join("banco.db"), ler_chave(&arquivo).unwrap()).unwrap();
+    Arc::new(Mutex::new(banco))
+}
+
+/// Um servidor com o token do teste no banco: criado na primeira vez, lido
+/// nas seguintes.
+fn servidor(dir: &Path, mock: &Mock) -> (Token, Arc<Mutex<Banco>>, IdDoToken) {
+    let banco = banco(dir);
+    let id = {
+        let b = banco.lock().unwrap();
+        match b.tokens().unwrap().first() {
+            Some(registro) => registro.id,
+            None => b
+                .criar_token("RemoteID", "remote-certificate-driver-remoteid", &[])
+                .unwrap(),
+        }
+    };
+    let guarda = GuardaNoBanco::novo(banco.clone(), id);
+    let token = Token::abrir(lancar(dir, mock), guarda).unwrap();
+    (token, banco, id)
+}
+
 fn configurado(dir: &Path, mock: &Mock) -> Token {
-    let mut token = Token::novo(lancar(dir, mock), BTreeMap::new());
+    let (mut token, _, _) = servidor(dir, mock);
     token.configurar(valores(EMAIL, SENHA)).expect("configura");
     token
 }
@@ -340,7 +372,7 @@ fn mecanismo_sem_suporte_nao_gasta_o_codigo() {
 fn senha_errada_na_configuracao_e_recusada() {
     let mock = Mock::subir();
     let dir = diretorio("senha-errada");
-    let mut token = Token::novo(lancar(&dir, &mock), BTreeMap::new());
+    let (mut token, _, _) = servidor(&dir, &mock);
 
     let falha = token.configurar(valores(EMAIL, "outra-senha"));
     assert!(
@@ -356,7 +388,7 @@ fn senha_errada_na_configuracao_e_recusada() {
 fn sem_configurar_nao_ha_chaves() {
     let mock = Mock::subir();
     let dir = diretorio("sem-conta");
-    let mut token = Token::novo(lancar(&dir, &mock), BTreeMap::new());
+    let (mut token, _, _) = servidor(&dir, &mock);
 
     let falha = token.listar();
     assert!(
@@ -397,7 +429,62 @@ fn nenhum_segredo_em_claro_no_disco_nem_no_log() {
         }
     }
     let tudo = String::from_utf8_lossy(&tudo);
-    for segredo in [SENHA, OTP, "procuracao de teste"] {
+    // O PIN local que o driver gerou só existe no cofre do banco, cifrado.
+    let (_, banco, id) = servidor(&dir, &mock);
+    let cofre = banco.lock().unwrap().cofre(id).unwrap();
+    let pin = cofre["pin"].expor();
+    assert_eq!(pin.len(), 6);
+    for segredo in [SENHA, OTP, pin, "procuracao de teste"] {
         assert!(!tudo.contains(segredo), "{segredo} em claro no disco");
     }
+}
+
+#[test]
+fn o_token_configurado_sobrevive_ao_reinicio_do_servidor() {
+    let mock = Mock::subir();
+    let dir = diretorio("reinicio");
+    let chave = configurado(&dir, &mock).listar().unwrap().remove(0);
+
+    // Outro servidor, com o mesmo banco: assina sem ninguém configurar de novo.
+    let (mut token, _, _) = servidor(&dir, &mock);
+    let assinatura = token.assinar(
+        &chave.id,
+        Mecanismo::Sha256RsaPkcs,
+        DOCUMENTO,
+        &mut Digita::codigos(&[OTP]),
+    );
+    assert!(assinatura.is_ok(), "{assinatura:?}");
+}
+
+#[test]
+fn token_parado_continua_parado_depois_do_reinicio() {
+    let mock = Mock::subir();
+    let dir = diretorio("parado");
+    let chave = configurado(&dir, &mock).listar().unwrap().remove(0);
+    {
+        // O PIN guardado deixa de valer (alguém o trocou por fora).
+        let (_, banco, id) = servidor(&dir, &mock);
+        let errado = BTreeMap::from([("pin".to_string(), Segredo::novo("000000".into()))]);
+        banco.lock().unwrap().configurado(id, &errado).unwrap();
+    }
+    let (mut token, _, _) = servidor(&dir, &mock);
+    let mut pessoa = Digita::codigos(&[OTP]);
+    let falha = token.assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa);
+    assert!(
+        matches!(falha, Err(FalhaDoToken::Desatualizado(_))),
+        "{falha:?}"
+    );
+    // A pessoa digitou um código só: o PIN errado não foi reenviado.
+    assert_eq!(pessoa.perguntas.len(), 1);
+    drop(token);
+
+    // Reiniciado, o token recusa sem falar com o RemoteID nem perguntar nada.
+    let (mut token, _, _) = servidor(&dir, &mock);
+    let mut pessoa = Digita::codigos(&[OTP]);
+    let falha = token.assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa);
+    assert!(
+        matches!(falha, Err(FalhaDoToken::Desatualizado(_))),
+        "{falha:?}"
+    );
+    assert!(pessoa.perguntas.is_empty());
 }

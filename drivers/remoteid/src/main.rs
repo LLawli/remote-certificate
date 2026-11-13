@@ -68,6 +68,10 @@ fn remoteid_vizinho() -> PathBuf {
 }
 
 fn main() -> ExitCode {
+    if let Err(e) = memoria::endurecer_processo() {
+        eprintln!("remoteid: não deu para proteger o processo: {e}");
+        return ExitCode::FAILURE;
+    }
     let opcoes = match Opcoes::ler(std::env::args_os().skip(1)) {
         Ok(opcoes) => opcoes,
         Err(mensagem) => {
@@ -224,7 +228,7 @@ impl<E: BufRead, S: Write> Driver<E, S> {
     fn ler_linha(&mut self) -> io::Result<Option<String>> {
         loop {
             let mut linha = String::new();
-            if self.entrada.read_line(&mut linha)? == 0 {
+            if protocolo::ler_linha(&mut self.entrada, &mut linha)? == 0 {
                 return Ok(None);
             }
             if !linha.trim().is_empty() {

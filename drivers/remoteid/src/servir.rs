@@ -1,6 +1,6 @@
 //! O `remoteid servir` como processo filho: JSON por linha no stdin e stdout.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -47,7 +47,7 @@ impl Servir {
 
     pub fn receber(&mut self) -> io::Result<Value> {
         let mut linha = String::new();
-        if self.saida.read_line(&mut linha)? == 0 {
+        if protocolo::ler_linha(&mut self.saida, &mut linha)? == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "o remoteid servir parou",

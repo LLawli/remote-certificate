@@ -13,6 +13,8 @@ os testes de lá mostram cada mensagem no fio.
   token, um processo por token.
 - A conversa é JSON, uma mensagem por linha, pelo stdin e pelo stdout. O stdout
   é só do protocolo; log vai para o stderr.
+- Uma linha tem no máximo 1 MiB (`protocolo::LINHA_MAXIMA`), nos dois
+  sentidos. Quem recebe uma maior encerra a conversa.
 - Um pedido por vez: o servidor só manda o próximo depois da resposta. Tokens
   físicos serializam as operações de qualquer forma.
 - Fechar o stdin encerra o driver.
@@ -127,10 +129,13 @@ driver pode pedir de novo, e o servidor decide:
 
 - Os fatores `guardado` saem do cofre; os `da_pessoa`, de quem pediu a
   operação, que nunca responde um fator guardado.
-- Um pedido com `recusa` que só tem fatores guardados é cancelado: o segredo
-  guardado está desatualizado, e o token fica parado até ser configurado de
-  novo. Um token físico nunca recebe a mesma tentativa errada duas vezes.
-- Um pedido com `recusa` e um fator da pessoa volta à pessoa com a mensagem.
+- Depois de uma `recusa`, o driver só pede de novo um fator guardado se foi
+  ele que o token recusou. Um pedido com `recusa` que traz um fator guardado é
+  cancelado, mesmo que traga também um da pessoa: o segredo guardado está
+  desatualizado, e o token fica parado até ser configurado de novo. Um token
+  físico nunca recebe a mesma tentativa errada duas vezes.
+- Um pedido com `recusa` só com fatores da pessoa volta à pessoa com a
+  mensagem.
 
 ## Segredos
 

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -150,7 +150,7 @@ impl Driver {
 
     fn receber(&mut self) -> Result<MensagemDoDriver, Falha> {
         let mut linha = String::new();
-        if self.saida.read_line(&mut linha)? == 0 {
+        if protocolo::ler_linha(&mut self.saida, &mut linha)? == 0 {
             return Err(Falha::Processo(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "o driver fechou a saída",
