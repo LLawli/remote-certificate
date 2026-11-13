@@ -125,7 +125,7 @@ o Cloudflare Tunnel.
 
 - Cada usuário tem um PIN pessoal, guardado com Argon2id. Ele identifica quem
   fez o quê na auditoria e faz com que só ter acesso ao computador não baste.
-- Errar o PIN pessoal N vezes seguidas bloqueia o dispositivo, até o
+- Errar o PIN pessoal 3 vezes seguidas bloqueia o dispositivo, até o
   administrador desbloquear. O acerto zera o contador. Assim quem pega o
   computador de alguém não consegue força bruta no PIN dessa pessoa.
 - O PIN pessoal nunca chega ao token. O PIN do token é um segredo guardado no
