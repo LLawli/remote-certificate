@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocolo", "crates/servidor"]
+members = ["crates/protocolo", "crates/servidor", "drivers/remoteid"]
+# O clone do RemoteID-linux que scripts/remoteid.sh faz é um projeto à parte.
+exclude = ["target/deps"]
 
 [workspace.package]
 version = "0.1.0"

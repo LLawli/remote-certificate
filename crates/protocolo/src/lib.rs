@@ -11,8 +11,8 @@ mod segredo;
 
 pub use mecanismo::{Mecanismo, suporta_tls13};
 pub use mensagem::{
-    Apresentacao, Assinatura, Chave, Erro, Fator, Listagem, MensagemDoDriver, Operacao, Pedido,
-    PedidoDeFatores, RespostaDeFatores, TipoDeErro, TipoDeFator,
+    Apresentacao, Assinatura, Campo, Chave, Configurado, Erro, Fator, Listagem, MensagemDoDriver,
+    Operacao, Pedido, PedidoDeFatores, RespostaDeFatores, TipoDeErro, TipoDeFator,
 };
 pub use segredo::Segredo;
 

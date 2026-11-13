@@ -117,22 +117,23 @@ entram, nem em log. `protocolo::Segredo` não aparece em `Debug` por isso.
 
 ## Primeiro driver: RemoteID
 
-O [RemoteID-linux](https://github.com/LLawli/RemoteID-linux) tem um servidor
+`drivers/remoteid`, binário `remote-certificate-driver-remoteid`. O
+[RemoteID-linux](https://github.com/LLawli/RemoteID-linux) tem um servidor
 falso (`remoteid-mock`), o que permite desenvolver e testar sem token nem conta
 real. O driver é um adaptador sobre o `remoteid servir` (JSON por linha no
-stdio), instalado à parte junto do `remoteid` estático do pacote de servidor
-daquele projeto. Não é uma dependência de crate: o servidor não carrega o
-RemoteID.
+stdio), que ele roda como processo filho; o `remoteid` estático do pacote de
+servidor daquele projeto é instalado junto do driver. Não é uma dependência de
+crate: o servidor não carrega o RemoteID.
 
-Mapeamento dos fatores: o OTP é `da_pessoa`; a senha da conta e o PIN local que
-a cifra (sem chaveiro no container) são `guardado`.
-
-Lacunas conhecidas:
-
-- O `servir` assina em modo `cru` só sobre um SHA-256. No TLS 1.2 o navegador
-  pode pedir DigestInfo de SHA-384 ou SHA-512. Para a face expor `CKM_RSA_PKCS`
-  inteiro, o `servir` precisa aceitar um DigestInfo pronto (o motor do RemoteID
-  já tem esse modo). Medir antes quais hashes os navegadores e o PJeOffice pedem.
+- **Configuração**: o administrador dá e-mail e senha. O driver entra na conta
+  com um PIN local que ele mesmo gera (sem chaveiro no container, esse PIN
+  cifra a senha no estado do `remoteid`) e o devolve para o servidor guardar.
+- **Fatores**: o PIN local e a senha são `guardado`; o OTP é `da_pessoa`.
+- **Mecanismos**: `CKM_SHA256_RSA_PKCS` vai ao `servir` como o hash SHA-256,
+  o caminho do aplicativo oficial. `CKM_SHA384_RSA_PKCS`,
+  `CKM_SHA512_RSA_PKCS` e `CKM_RSA_PKCS` vão como um DigestInfo pronto
+  (`digest_info`), que o `servir` aceita desde a v0.5.1 do RemoteID-linux, a
+  mesma que traz o DER do certificado na visão. O driver exige essa versão.
 - A Certisign não assina RSA-PSS: o driver não declara `CKM_RSA_PKCS_PSS`, e o
   token virtual não se anuncia para TLS 1.3.
 

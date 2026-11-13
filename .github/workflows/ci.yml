@@ -13,6 +13,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            target/deps/RemoteID-linux -> target
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit

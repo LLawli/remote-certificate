@@ -32,8 +32,8 @@ O driver responde com o resultado ou com uma falha:
 
 `tipo` é estável e serve para o servidor decidir; `mensagem` é para a pessoa
 ler. Os tipos: `pedido_invalido`, `versao_incompativel`, `token_ausente`,
-`chave_ausente`, `mecanismo_nao_suportado`, `fator_recusado`, `bloqueado`,
-`cancelado`, `rede`. Um tipo que o servidor não conhece é lido como `outro`.
+`nao_configurado`, `chave_ausente`, `mecanismo_nao_suportado`,
+`fator_recusado`, `bloqueado`, `cancelado`, `rede`. Um tipo que o servidor não conhece é lido como `outro`.
 
 ## Operações
 
@@ -46,8 +46,13 @@ driver responde quem é e que fatores pode pedir, ou `versao_incompativel`.
 {"id": 1, "ok": {
   "driver": "remoteid", "versao": "0.1.0", "protocolo": 0,
   "fatores": [
-    {"nome": "senha", "tipo": "guardado", "rotulo": "Senha da conta"},
+    {"nome": "pin", "tipo": "guardado", "rotulo": "PIN local do RemoteID"},
+    {"nome": "senha", "tipo": "guardado", "rotulo": "Senha da conta RemoteID"},
     {"nome": "otp", "tipo": "da_pessoa", "rotulo": "Código do autenticador"}
+  ],
+  "configuracao": [
+    {"nome": "email", "rotulo": "E-mail da conta RemoteID", "secreto": false},
+    {"nome": "senha", "rotulo": "Senha da conta RemoteID", "secreto": true}
   ]
 }}
 ```
@@ -57,13 +62,28 @@ driver responde quem é e que fatores pode pedir, ou `versao_incompativel`.
 - `da_pessoa`: o servidor pergunta a quem pediu a operação, a cada vez, e nunca
   guarda (OTP).
 
+### `configurar`
+
+Prepara o token com os campos de `configuracao`, que o servidor pede ao
+administrador. Um token físico costuma ter só o `pin`.
+
+```json
+{"id": 2, "op": "configurar", "valores": {"email": "...", "senha": "..."}}
+{"id": 2, "ok": {"guardar": {"pin": "..."}}}
+```
+
+O servidor guarda, como fatores `guardado`, os campos que têm o nome de um
+fator guardado e o que vier em `guardar`: segredos que o próprio driver gerou e
+que ninguém precisa conhecer (o RemoteID gera ali o PIN local que cifra a
+senha). Sem nada a guardar, `guardar` vem vazio.
+
 ### `listar`
 
 As chaves que o driver enxerga agora.
 
 ```json
-{"id": 2, "op": "listar"}
-{"id": 2, "ok": {"chaves": [{
+{"id": 3, "op": "listar"}
+{"id": 3, "ok": {"chaves": [{
   "id": "1234;AC Exemplo", "rotulo": "FULANO:00000000000",
   "certificado": "<DER em base64>",
   "mecanismos": ["CKM_RSA_PKCS", "CKM_SHA256_RSA_PKCS"]
@@ -77,9 +97,9 @@ conhece é ignorado.
 ### `assinar`
 
 ```json
-{"id": 3, "op": "assinar", "chave": "1234;AC Exemplo",
+{"id": 4, "op": "assinar", "chave": "1234;AC Exemplo",
  "mecanismo": "CKM_RSA_PKCS", "dados": "<base64>"}
-{"id": 3, "ok": {"assinatura": "<base64>"}}
+{"id": 4, "ok": {"assinatura": "<base64>"}}
 ```
 
 Com `CKM_RSA_PKCS`, `dados` é o DigestInfo pronto; com `CKM_SHA256_RSA_PKCS` e
@@ -90,18 +110,25 @@ parecidos, os dados inteiros; com `CKM_RSA_PKCS_PSS` e `CKM_ECDSA`, o hash.
 Quando precisa de fatores, o driver pergunta antes de responder, no mesmo `id`:
 
 ```json
-{"id": 3, "pedir": {"fatores": ["senha", "otp"], "recusa": null}}
+{"id": 4, "pedir": {"fatores": ["pin", "otp"], "recusa": null}}
 ```
 
 e o servidor responde com os fatores ou desiste:
 
 ```json
-{"id": 3, "fatores": {"senha": "...", "otp": "123456"}}
-{"id": 3, "cancelar": true}
+{"id": 4, "fatores": {"pin": "...", "otp": "123456"}}
+{"id": 4, "cancelar": true}
 ```
 
 `recusa` traz a mensagem da tentativa anterior quando o token recusou. O
-driver pode pedir de novo; o servidor decide quantas vezes aceita.
+driver pode pedir de novo, e o servidor decide:
+
+- Os fatores `guardado` saem do cofre; os `da_pessoa`, de quem pediu a
+  operação, que nunca responde um fator guardado.
+- Um pedido com `recusa` que só tem fatores guardados é cancelado: o segredo
+  guardado está desatualizado, e o token fica parado até ser configurado de
+  novo. Um token físico nunca recebe a mesma tentativa errada duas vezes.
+- Um pedido com `recusa` e um fator da pessoa volta à pessoa com a mensagem.
 
 ## Segredos
 

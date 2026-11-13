@@ -18,6 +18,10 @@ pub enum Operacao {
     /// Primeira mensagem de toda conversa: a versão do contrato que o servidor
     /// fala. O driver responde com uma [`Apresentacao`].
     Apresentar { versao: u32 },
+    /// Prepara o token com os campos que o driver declarou em
+    /// [`Apresentacao::configuracao`]. O driver responde com um
+    /// [`Configurado`].
+    Configurar { valores: BTreeMap<String, Segredo> },
     /// As chaves que o driver enxerga agora (um token físico pode ter saído).
     /// O driver responde com uma [`Listagem`].
     Listar,
@@ -70,6 +74,8 @@ pub enum TipoDeErro {
     VersaoIncompativel,
     /// O token não está acessível: removido, servidor do fornecedor fora.
     TokenAusente,
+    /// Falta o `configurar`.
+    NaoConfigurado,
     ChaveAusente,
     MecanismoNaoSuportado,
     /// O token recusou os fatores. Para um fator guardado, é sinal de que o
@@ -119,6 +125,25 @@ pub struct Apresentacao {
     /// Versão do contrato que ele fala.
     pub protocolo: u32,
     pub fatores: Vec<Fator>,
+    /// O que o `configurar` recebe. Um campo com o nome de um fator
+    /// `guardado` também é guardado pelo servidor como esse fator.
+    pub configuracao: Vec<Campo>,
+}
+
+/// Um campo do `configurar`, para o servidor montar o formulário.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Campo {
+    pub nome: String,
+    pub rotulo: String,
+    /// Não é mostrado ao ser digitado.
+    pub secreto: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Configurado {
+    /// Fatores `guardado` que o próprio driver gerou (um PIN interno, por
+    /// exemplo), para o servidor guardar e responder depois.
+    pub guardar: BTreeMap<String, Segredo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +264,9 @@ mod testes {
             "fatores": [
                 {"nome": "pin", "tipo": "guardado", "rotulo": "PIN do certificado"},
                 {"nome": "otp", "tipo": "da_pessoa", "rotulo": "Código do autenticador"}
+            ],
+            "configuracao": [
+                {"nome": "email", "rotulo": "E-mail", "secreto": false}
             ]
         });
         let apresentacao: Apresentacao = serde_json::from_value(fio).unwrap();

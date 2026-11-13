@@ -28,10 +28,11 @@ As estações começam pelo Linux; Windows e macOS estão previstos no desenho.
 ## Desenvolvimento
 
 ```sh
-scripts/ci.sh    # formatação, clippy, testes, auditoria de dependências, shellcheck
+scripts/ci.sh
 ```
 
-O contrato entre o servidor e os drivers está em [docs/drivers.md](docs/drivers.md).
+Como testar, em [docs/desenvolvimento.md](docs/desenvolvimento.md); o contrato
+entre o servidor e os drivers, em [docs/drivers.md](docs/drivers.md).
 
 ## Licença
 

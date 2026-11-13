@@ -1,0 +1,29 @@
+[package]
+name = "driver-remoteid"
+description = "Driver do RemoteID (Certisign) para o remote-certificate, sobre o remoteid servir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "remote-certificate-driver-remoteid"
+path = "src/main.rs"
+
+[dependencies]
+protocolo.workspace = true
+base64.workspace = true
+getrandom = { version = "0.3", features = ["std"] }
+serde_json.workspace = true
+sha2 = "0.11"
+
+[dev-dependencies]
+servidor = { path = "../../crates/servidor" }
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+sha1 = "0.11"
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
+ureq = "3"
+
+[lints]
+workspace = true
