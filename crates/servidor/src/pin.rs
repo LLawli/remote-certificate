@@ -33,7 +33,7 @@ fn argon2id() -> Argon2<'static> {
 }
 
 /// A prova de que o PIN pessoal conferiu: só [`conferir`] cria uma.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Autenticado {
     usuario: IdDoUsuario,
     dispositivo: IdDoDispositivo,

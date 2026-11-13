@@ -86,6 +86,10 @@ const MIGRACOES: &[&str] = &[
         expira INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    ALTER TABLE dispositivo ADD COLUMN revogado INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE token ADD COLUMN geracao INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 #[derive(Debug)]
@@ -150,6 +154,9 @@ pub struct RegistroDoToken {
     /// O executável do driver, em `/drivers`.
     pub driver: String,
     pub argumentos: Vec<String>,
+    /// Sobe a cada configuração: o serviço relança o driver de um token
+    /// configurado de novo por fora.
+    pub geracao: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +197,15 @@ pub struct RegistroDoDispositivo {
     pub usuario: String,
     pub nome: String,
     pub erros_seguidos: u32,
+    pub revogado: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Situacao {
+    Ativo,
+    Bloqueado,
+    /// Revogado, ou não existe.
+    Fora,
 }
 
 /// O certificado e a chave PKCS#8 do servidor.
@@ -300,17 +316,28 @@ impl Banco {
     pub fn tokens(&self) -> Result<Vec<RegistroDoToken>, FalhaDoBanco> {
         let mut consulta = self
             .conexao
-            .prepare("SELECT id, nome, driver, argumentos FROM token ORDER BY nome")?;
-        let linhas = consulta.query_map([], |l| {
-            let argumentos: String = l.get(3)?;
-            Ok(RegistroDoToken {
-                id: IdDoToken(l.get(0)?),
-                nome: l.get(1)?,
-                driver: l.get(2)?,
-                argumentos: serde_json::from_str(&argumentos).unwrap_or_default(),
-            })
-        })?;
+            .prepare("SELECT id, nome, driver, argumentos, geracao FROM token ORDER BY nome")?;
+        let linhas = consulta.query_map([], registro_do_token)?;
         Ok(linhas.collect::<Result<_, _>>()?)
+    }
+
+    pub fn token(&self, nome: &str) -> Result<Option<RegistroDoToken>, FalhaDoBanco> {
+        Ok(self
+            .conexao
+            .query_row(
+                "SELECT id, nome, driver, argumentos, geracao FROM token WHERE nome = ?1",
+                [nome],
+                registro_do_token,
+            )
+            .optional()?)
+    }
+
+    pub fn geracao(&self, token: IdDoToken) -> Result<i64, FalhaDoBanco> {
+        Ok(self
+            .conexao
+            .query_row("SELECT geracao FROM token WHERE id = ?1", [token.0], |l| {
+                l.get(0)
+            })?)
     }
 
     /// Os fatores guardados do token.
@@ -354,7 +381,7 @@ impl Banco {
             )?;
         }
         transacao.execute(
-            "UPDATE token SET desatualizado = NULL WHERE id = ?1",
+            "UPDATE token SET desatualizado = NULL, geracao = geracao + 1 WHERE id = ?1",
             [token.0],
         )?;
         transacao.commit()?;
@@ -416,7 +443,7 @@ impl Banco {
 
     pub fn dispositivos(&self) -> Result<Vec<RegistroDoDispositivo>, FalhaDoBanco> {
         let mut consulta = self.conexao.prepare(
-            "SELECT d.id, u.nome, d.nome, d.erros_seguidos
+            "SELECT d.id, u.nome, d.nome, d.erros_seguidos, d.revogado
              FROM dispositivo d JOIN usuario u ON u.id = d.usuario
              ORDER BY u.nome, d.nome",
         )?;
@@ -426,9 +453,42 @@ impl Banco {
                 usuario: l.get(1)?,
                 nome: l.get(2)?,
                 erros_seguidos: l.get(3)?,
+                revogado: l.get(4)?,
             })
         })?;
         Ok(linhas.collect::<Result<_, _>>()?)
+    }
+
+    /// Se o dispositivo ainda é atendido, com `limite` erros de PIN para
+    /// bloquear.
+    pub fn situacao(
+        &self,
+        dispositivo: IdDoDispositivo,
+        limite: u32,
+    ) -> Result<Situacao, FalhaDoBanco> {
+        let linha: Option<(u32, bool)> = self
+            .conexao
+            .query_row(
+                "SELECT erros_seguidos, revogado FROM dispositivo WHERE id = ?1",
+                [dispositivo.0],
+                |l| Ok((l.get(0)?, l.get(1)?)),
+            )
+            .optional()?;
+        Ok(match linha {
+            None | Some((_, true)) => Situacao::Fora,
+            Some((erros, false)) if erros >= limite => Situacao::Bloqueado,
+            Some(_) => Situacao::Ativo,
+        })
+    }
+
+    /// O dispositivo deixa de ser atendido, para sempre: a chave dele cai no
+    /// handshake e não pareia de novo. `false` se ele não existe.
+    pub fn revogar(&self, dispositivo: IdDoDispositivo) -> Result<bool, FalhaDoBanco> {
+        let mudou = self.conexao.execute(
+            "UPDATE dispositivo SET revogado = 1 WHERE id = ?1",
+            [dispositivo.0],
+        )?;
+        Ok(mudou == 1)
     }
 
     /// Conta a tentativa como erro antes de o PIN ser conferido, a não ser que
@@ -446,7 +506,7 @@ impl Banco {
             .query_row(
                 "SELECT d.usuario, d.erros_seguidos, u.pin
                  FROM dispositivo d JOIN usuario u ON u.id = d.usuario
-                 WHERE d.id = ?1",
+                 WHERE d.id = ?1 AND d.revogado = 0",
                 [dispositivo.0],
                 |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
             )
@@ -529,7 +589,7 @@ impl Banco {
         agora: Instante,
     ) -> Result<bool, FalhaDoBanco> {
         Ok(self.conexao.query_row(
-            "SELECT EXISTS (SELECT 1 FROM dispositivo WHERE chave_publica = ?1)
+            "SELECT EXISTS (SELECT 1 FROM dispositivo WHERE chave_publica = ?1 AND revogado = 0)
                  OR EXISTS (SELECT 1 FROM pareamento WHERE expira > ?2)",
             params![chave_publica, agora],
             |l| l.get(0),
@@ -543,7 +603,7 @@ impl Banco {
         Ok(self
             .conexao
             .query_row(
-                "SELECT id FROM dispositivo WHERE chave_publica = ?1",
+                "SELECT id FROM dispositivo WHERE chave_publica = ?1 AND revogado = 0",
                 [chave_publica],
                 |l| l.get(0).map(IdDoDispositivo),
             )
@@ -654,6 +714,17 @@ impl Banco {
         }
         Ok(())
     }
+}
+
+fn registro_do_token(l: &rusqlite::Row<'_>) -> rusqlite::Result<RegistroDoToken> {
+    let argumentos: String = l.get(3)?;
+    Ok(RegistroDoToken {
+        id: IdDoToken(l.get(0)?),
+        nome: l.get(1)?,
+        driver: l.get(2)?,
+        argumentos: serde_json::from_str(&argumentos).unwrap_or_default(),
+        geracao: l.get(4)?,
+    })
 }
 
 /// `x'<hex>'`: a chave crua, sem KDF (ela já é aleatória).

@@ -21,11 +21,17 @@ use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave, travar};
 use servidor::driver::{Conversa, Driver, Falha, Responder};
 use servidor::fatores::{Motivo, Pessoa};
 use servidor::pin::{self, Autenticado};
+use servidor::servico::{self, Estado};
 use servidor::token::{FalhaDoToken, GuardaNoBanco, Token};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, Encode};
+
+use rede::agente::{Conexao, DoAgente, DoServidor, TipoDeFalha};
+use rede::pareamento::parear;
+use rede::tls::Identidade;
+use tokio::net::TcpListener;
 
 const EMAIL: &str = "teste@remoteid.local";
 const SENHA: &str = "teste-1234";
@@ -635,4 +641,188 @@ fn o_pin_pessoal_nunca_chega_ao_driver() {
         enviados.iter().all(|v| !v.contains(PIN_PESSOAL)),
         "o PIN pessoal foi ao driver"
     );
+}
+
+/// O token configurado no banco como o administrador faria: o driver com os
+/// argumentos dele, e a conta pelo `configurar`.
+fn token_no_banco(dir: &Path, mock: &Mock, banco: &Arc<Mutex<Banco>>) -> IdDoToken {
+    let estado = dir.join("estado");
+    std::fs::create_dir_all(&estado).unwrap();
+    let argumentos: Vec<String> = [
+        "--estado".into(),
+        estado.display().to_string(),
+        "--remoteid".into(),
+        binario("REMOTEID_BIN").display().to_string(),
+        "--servidor".into(),
+        mock.url.clone(),
+    ]
+    .into();
+    let executavel = env!("CARGO_BIN_EXE_remote-certificate-driver-remoteid");
+    let id = travar(banco)
+        .criar_token("RemoteID", executavel, &argumentos)
+        .unwrap();
+    configurar_por_fora(banco, id);
+    id
+}
+
+/// O que `remote-certificate token configurar` faz: outro processo do driver,
+/// com o serviço rodando ou não.
+fn configurar_por_fora(banco: &Arc<Mutex<Banco>>, id: IdDoToken) {
+    let registro = travar(banco)
+        .tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == id)
+        .unwrap();
+    let driver = Driver::lancar(Command::new(&registro.driver).args(&registro.argumentos)).unwrap();
+    Token::abrir(driver, GuardaNoBanco::novo(banco.clone(), id))
+        .unwrap()
+        .configurar(valores(EMAIL, SENHA))
+        .unwrap();
+}
+
+/// A próxima mensagem que não é aviso.
+async fn resposta(conexao: &mut Conexao) -> DoServidor {
+    loop {
+        match conexao.receber().await.unwrap() {
+            DoServidor::Aviso { .. } => continue,
+            outra => return outra,
+        }
+    }
+}
+
+#[test]
+fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
+    let mock = Mock::subir();
+    let dir = diretorio("agente");
+    let banco = banco(&dir);
+    let token = token_no_banco(&dir, &mock, &banco);
+    let hash = pin::hash(&Segredo::novo(PIN_PESSOAL.into())).unwrap();
+    let maria = travar(&banco).criar_usuario("maria", &hash).unwrap();
+
+    let execucao = tokio::runtime::Runtime::new().unwrap();
+    execucao.block_on(async {
+        let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endereco = ouvinte.local_addr().unwrap().to_string();
+        // O driver está num caminho absoluto: o diretório dos drivers não conta.
+        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        tokio::spawn(servico::servir(ouvinte, estado));
+
+        let codigo = servico::novo_pareamento(&banco, maria, "notebook").unwrap();
+        let identidade = Identidade::gerar().unwrap();
+        let pareado = parear(&endereco, &codigo, &identidade).await.unwrap();
+        let mut conexao = Conexao::abrir(&endereco, &identidade, pareado.servidor)
+            .await
+            .unwrap();
+
+        conexao.enviar(&DoAgente::Listar { id: 1 }).await.unwrap();
+        let DoServidor::Chaves { chaves, .. } = resposta(&mut conexao).await else {
+            panic!("esperava as chaves");
+        };
+        assert_eq!(chaves.len(), 1);
+        assert_eq!(chaves[0].token, "RemoteID");
+        let publica = chave_publica(&chaves[0].chave);
+
+        let pin = Segredo::novo(PIN_PESSOAL.into());
+        conexao
+            .enviar(&DoAgente::Entrar { id: 2, pin })
+            .await
+            .unwrap();
+        assert_eq!(resposta(&mut conexao).await, DoServidor::Entrou { id: 2 });
+
+        let assinar = |id| DoAgente::Assinar {
+            id,
+            token: "RemoteID".into(),
+            chave: chaves[0].chave.id.clone(),
+            mecanismo: Mecanismo::Sha256RsaPkcs,
+            dados: DOCUMENTO.to_vec(),
+        };
+        let otp = |id, codigo: &str| DoAgente::Fatores {
+            id,
+            valores: BTreeMap::from([("otp".to_string(), Segredo::novo(codigo.into()))]),
+        };
+
+        // O token pede o OTP no meio; um código errado volta com a recusa.
+        conexao.enviar(&assinar(3)).await.unwrap();
+        let DoServidor::PedidoDeFatores {
+            id: 3,
+            fatores,
+            recusa: None,
+        } = resposta(&mut conexao).await
+        else {
+            panic!("esperava o pedido do OTP");
+        };
+        assert_eq!(
+            fatores.iter().map(|f| f.nome.as_str()).collect::<Vec<_>>(),
+            ["otp"]
+        );
+        conexao.enviar(&otp(3, "999999")).await.unwrap();
+        let DoServidor::PedidoDeFatores {
+            id: 3,
+            recusa: Some(_),
+            ..
+        } = resposta(&mut conexao).await
+        else {
+            panic!("esperava o pedido de novo, com a recusa");
+        };
+        conexao.enviar(&otp(3, OTP)).await.unwrap();
+        let DoServidor::Assinatura { id: 3, assinatura } = resposta(&mut conexao).await else {
+            panic!("esperava a assinatura");
+        };
+        publica
+            .verify(
+                Pkcs1v15Sign::new::<Sha256>(),
+                &Sha256::digest(DOCUMENTO),
+                &assinatura,
+            )
+            .expect("a assinatura confere com o certificado");
+
+        // A sessão do RemoteID aberta pelo OTP atende a próxima sem perguntar.
+        conexao.enviar(&assinar(4)).await.unwrap();
+        assert!(matches!(
+            resposta(&mut conexao).await,
+            DoServidor::Assinatura { id: 4, .. }
+        ));
+
+        // Quem desiste do OTP cancela, e o token continua servindo.
+        mock.expirar_sessoes();
+        conexao.enviar(&assinar(5)).await.unwrap();
+        assert!(matches!(
+            resposta(&mut conexao).await,
+            DoServidor::PedidoDeFatores { id: 5, .. }
+        ));
+        conexao.enviar(&DoAgente::Desistir { id: 5 }).await.unwrap();
+        assert!(matches!(
+            resposta(&mut conexao).await,
+            DoServidor::Falha { id: Some(5), ref erro } if erro.tipo == TipoDeFalha::Cancelado
+        ));
+
+        // O PIN guardado fica velho: o token recusa, para e avisa.
+        let errado = BTreeMap::from([("pin".to_string(), Segredo::novo("000000".into()))]);
+        travar(&banco).configurado(token, &errado).unwrap();
+        conexao.enviar(&assinar(6)).await.unwrap();
+        assert!(matches!(
+            resposta(&mut conexao).await,
+            DoServidor::PedidoDeFatores { id: 6, .. }
+        ));
+        conexao.enviar(&otp(6, OTP)).await.unwrap();
+        assert!(matches!(
+            resposta(&mut conexao).await,
+            DoServidor::Falha { id: Some(6), ref erro } if erro.tipo == TipoDeFalha::TokenParado
+        ));
+
+        // O administrador configura de novo com o serviço rodando, e o
+        // servidor volta a assinar sem reiniciar.
+        configurar_por_fora(&banco, token);
+        conexao.enviar(&assinar(7)).await.unwrap();
+        if let DoServidor::PedidoDeFatores { id: 7, .. } = resposta(&mut conexao).await {
+            conexao.enviar(&otp(7, OTP)).await.unwrap();
+            assert!(matches!(
+                resposta(&mut conexao).await,
+                DoServidor::Assinatura { id: 7, .. }
+            ));
+        } else {
+            panic!("o token configurado de novo pede o OTP de uma sessão nova");
+        }
+    });
 }

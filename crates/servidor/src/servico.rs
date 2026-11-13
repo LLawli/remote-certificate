@@ -6,28 +6,36 @@
 
 use std::fmt;
 use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use data_encoding::BASE32_NOPAD;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
+use rede::agente::LIMITE_DA_MENSAGEM;
 use rede::pareamento::{
     self, CodigoDePareamento, LIMITE_DO_CORPO, Pareamento, PedidoDePareamento, TAMANHO_DO_SEGREDO,
 };
 use rede::tls::{self, Identidade, Porteiro, config_do_servidor};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
-use crate::banco::{Banco, FalhaDoBanco, IdDoUsuario, IdentidadeGuardada, Instante, travar};
+use crate::agente;
+use crate::banco::{
+    Banco, FalhaDoBanco, IdDoDispositivo, IdDoUsuario, IdentidadeGuardada, Instante, travar,
+};
+use crate::tokens::{Evento, Tokens};
 
 /// Onde o container atende.
 pub const ENDERECO_PADRAO: &str = "0.0.0.0:8443";
@@ -124,23 +132,50 @@ impl Porteiro for PorteiroDoBanco {
     }
 }
 
+/// Quantos eventos um agente lento pode deixar para trás.
+const EVENTOS_NA_FILA: usize = 64;
+
+/// O que todas as conexões compartilham.
+pub struct Estado {
+    pub banco: Arc<Mutex<Banco>>,
+    pub tokens: Tokens,
+    pub eventos: broadcast::Sender<Evento>,
+}
+
+impl Estado {
+    /// O estado com os tokens do banco, com os drivers em `drivers`.
+    pub fn iniciar(
+        banco: Arc<Mutex<Banco>>,
+        drivers: &Path,
+    ) -> Result<Arc<Estado>, FalhaDoServico> {
+        let (eventos, _) = broadcast::channel(EVENTOS_NA_FILA);
+        let tokens = Tokens::iniciar(&banco, drivers, &eventos)?;
+        Ok(Arc::new(Estado {
+            banco,
+            tokens,
+            eventos,
+        }))
+    }
+}
+
 /// Quem está do outro lado de uma conexão que passou do handshake.
 #[derive(Debug, Clone)]
 enum Quem {
-    Dispositivo,
+    Dispositivo(IdDoDispositivo),
     /// Uma chave nova, aceita porque há pareamento pendente.
     Pareando(Arc<Vec<u8>>),
 }
 
 /// Atende em `ouvinte` até o processo acabar.
-pub async fn servir(ouvinte: TcpListener, banco: Arc<Mutex<Banco>>) -> Result<(), FalhaDoServico> {
+pub async fn servir(ouvinte: TcpListener, estado: Arc<Estado>) -> Result<(), FalhaDoServico> {
+    let banco = estado.banco.clone();
     let config = config_do_servidor(
         &identidade(&banco)?,
         Arc::new(PorteiroDoBanco(banco.clone())),
     )
     .map_err(FalhaDoServico::Tls)?;
     let aceitador = TlsAcceptor::from(Arc::new(config));
-    let rotas = rotas(banco.clone());
+    let rotas = rotas(estado);
     loop {
         let Ok((tcp, _)) = ouvinte.accept().await else {
             tokio::time::sleep(PAUSA_DEPOIS_DE_FALHA).await;
@@ -165,7 +200,7 @@ pub async fn servir(ouvinte: TcpListener, banco: Arc<Mutex<Banco>>) -> Result<()
                 return;
             };
             let quem = match travar(&banco).dispositivo_da_chave(&chave) {
-                Ok(Some(_)) => Quem::Dispositivo,
+                Ok(Some(dispositivo)) => Quem::Dispositivo(dispositivo),
                 Ok(None) => Quem::Pareando(Arc::new(chave)),
                 Err(_) => return,
             };
@@ -178,16 +213,17 @@ pub async fn servir(ouvinte: TcpListener, banco: Arc<Mutex<Banco>>) -> Result<()
     }
 }
 
-fn rotas(banco: Arc<Mutex<Banco>>) -> Router {
+fn rotas(estado: Arc<Estado>) -> Router {
     Router::new()
+        .route(rede::agente::CAMINHO, get(conectar_agente))
         .route(pareamento::CAMINHO, post(parear))
         .fallback(fora_das_rotas)
         .layer(DefaultBodyLimit::max(LIMITE_DO_CORPO))
-        .with_state(banco)
+        .with_state(estado)
 }
 
 async fn parear(
-    State(banco): State<Arc<Mutex<Banco>>>,
+    State(estado): State<Arc<Estado>>,
     Extension(quem): Extension<Quem>,
     corpo: Bytes,
 ) -> Response {
@@ -206,7 +242,7 @@ async fn parear(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let segredo: [u8; 32] = Sha256::digest(segredo.as_slice()).into();
-    match travar(&banco).usar_pareamento(&segredo, &chave, agora()) {
+    match travar(&estado.banco).usar_pareamento(&segredo, &chave, agora()) {
         Ok(Some(dispositivo)) => (
             StatusCode::CREATED,
             Json(Pareamento {
@@ -223,6 +259,19 @@ async fn parear(
 async fn fora_das_rotas(Extension(quem): Extension<Quem>) -> StatusCode {
     match quem {
         Quem::Pareando(_) => StatusCode::FORBIDDEN,
-        Quem::Dispositivo => StatusCode::NOT_FOUND,
+        Quem::Dispositivo(_) => StatusCode::NOT_FOUND,
     }
+}
+
+async fn conectar_agente(
+    State(estado): State<Arc<Estado>>,
+    Extension(quem): Extension<Quem>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Quem::Dispositivo(dispositivo) = quem else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    ws.max_message_size(LIMITE_DA_MENSAGEM)
+        .max_frame_size(LIMITE_DA_MENSAGEM)
+        .on_upgrade(move |socket| agente::atender(socket, dispositivo, estado))
 }

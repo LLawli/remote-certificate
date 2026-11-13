@@ -28,10 +28,15 @@ o contrato dos drivers, em [drivers.md](drivers.md).
   RemoteID. O servidor lança um processo por token configurado e conversa pelo
   contrato de [drivers.md](drivers.md) (`crates/protocolo`). Processo separado
   também isola o servidor de um módulo de fornecedor que trava ou vaza memória,
-  e um token que trava não para os outros.
+  e um token que trava não para os outros. Cada token tem uma thread dona do
+  driver (`servidor::tokens`), que o sobe no primeiro uso, o relança quando o
+  processo morre e quando o token é configurado de novo com o serviço rodando
+  (a `geracao` do token no banco sobe a cada configuração).
 - **Administração**: uma CLI no próprio servidor (`docker compose exec`):
-  configurar token, criar usuário, parear dispositivo, desbloquear. Se um dia
-  precisar de mais, no máximo uma API de administração, sem interface web.
+  `token criar|configurar|listar`, `usuario criar|pin`,
+  `dispositivo parear|listar|desbloquear|revogar`, `backup`, `recuperacao`.
+  Se um dia precisar de mais, no máximo uma API de administração, sem
+  interface web.
 - **Cliente da estação**: um agente e as faces (abaixo).
 - **Sistemas integrados**: falam com a API HTTP do servidor.
 
@@ -71,6 +76,20 @@ duas camadas:
   - macOS (depois): CryptoTokenKit.
   - O IPC entre face e agente fica atrás de um trait: socket Unix no Linux e no
     macOS, named pipe no Windows.
+
+O agente fala com o servidor por um WebSocket em `/v1/agente`, sobre o mTLS
+do dispositivo, com uma mensagem JSON por quadro (`rede::agente`):
+
+- `entrar` com o PIN pessoal abre a sessão para assinar; ela vence depois de
+  15 minutos sem uso (provisório, a medir na VM) ou com `sair`. `listar` não
+  pede o PIN, como um token físico mostra os certificados antes do login.
+- `assinar` pode receber, no meio, um `pedido_de_fatores` (o OTP, com a recusa
+  quando pede de novo), que o agente responde com `fatores` ou `desistir`, no
+  mesmo `id`. Uma operação por conexão de cada vez.
+- O servidor avisa sem ser perguntado: `dispositivo_bloqueado` e
+  `token_parado`.
+- Antes de cada mensagem, o servidor confere o dispositivo no banco: revogado,
+  a conexão cai; bloqueado, toda operação volta `bloqueado`.
 
 A face expõe só o que o driver declara. Um token sem RSA-PSS nem ECDSA não se
 anuncia para TLS 1.3 (`protocolo::suporta_tls13`).
@@ -232,6 +251,8 @@ aceito aqui.
   WebSocket para o agente; exposição recomendada pelo Tailscale, na porta 8443.
 - **Pareamento**: código com a impressão da chave do servidor e um segredo de
   uso único, sem PAKE.
+- **Dispositivo comprometido**: `dispositivo revogar`, que não apaga a linha
+  (a auditoria aponta para ela) e deixa a chave cair no handshake para sempre.
 - **Chave do banco**: secret do Docker. O servidor não prevê rodar fora de
   container. O desbloqueio pelo administrador a cada partida ficou de fora:
   deixaria o serviço parado depois de toda queda até alguém aparecer.

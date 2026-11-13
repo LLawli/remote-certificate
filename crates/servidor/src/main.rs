@@ -2,25 +2,33 @@
 //! recuperação, os usuários e os dispositivos. O desenho está em
 //! `docs/arquitetura.md`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::{Arc, Mutex};
 
 use protocolo::Segredo;
 use rustix::termios::{self, LocalModes, OptionalActions};
 use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave, travar};
+use servidor::driver::{Conversa, Driver};
 use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
 use servidor::recuperacao::{self, CodigoInvalido};
-use servidor::servico::{self, ENDERECO_PADRAO, VALIDADE_DO_PAREAMENTO};
+use servidor::servico::{self, ENDERECO_PADRAO, Estado, VALIDADE_DO_PAREAMENTO};
+use servidor::token::{GuardaNoBanco, Token};
+use servidor::tokens::DRIVERS_PADRAO;
 use zeroize::Zeroizing;
 
 const USO: &str = "\
 uso: remote-certificate <comando>
 
   versao
-  servir [--endereco <ip:porta>] [--banco <arquivo>] [--chave <arquivo>]
+  servir [--endereco <ip:porta>] [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
+  token criar <nome> <driver> [--banco <arquivo>] [--chave <arquivo>] [-- <argumentos do driver>]
+  token configurar <nome>  [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
+                     pergunta o que o driver pede (os segredos sem eco)
+  token listar             [--banco <arquivo>] [--chave <arquivo>]
   backup <destino> [--banco <arquivo>] [--chave <arquivo>]
                      copia o banco com o serviço rodando e confere a cópia
   recuperacao mostrar [--chave <arquivo>]
@@ -33,7 +41,8 @@ uso: remote-certificate <comando>
   dispositivo parear <usuario> <nome> [--banco <arquivo>] [--chave <arquivo>]
                      mostra um código de pareamento de uso único
   dispositivo listar       [--banco <arquivo>] [--chave <arquivo>]
-  dispositivo desbloquear <id> [--banco <arquivo>] [--chave <arquivo>]";
+  dispositivo desbloquear <id> [--banco <arquivo>] [--chave <arquivo>]
+  dispositivo revogar <id> [--banco <arquivo>] [--chave <arquivo>]";
 
 /// Limpa a tela e o histórico do terminal, para o código não ficar ali.
 const LIMPAR_TERMINAL: &str = "\x1b[2J\x1b[3J\x1b[H";
@@ -63,6 +72,10 @@ fn main() -> ExitCode {
         ["dispositivo", "parear", usuario, nome, resto @ ..] => parear(usuario, nome, resto),
         ["dispositivo", "listar", resto @ ..] => listar_dispositivos(resto),
         ["dispositivo", "desbloquear", id, resto @ ..] => desbloquear(id, resto),
+        ["dispositivo", "revogar", id, resto @ ..] => revogar(id, resto),
+        ["token", "criar", nome, driver, resto @ ..] => criar_token(nome, driver, resto),
+        ["token", "configurar", nome, resto @ ..] => configurar_token(nome, resto),
+        ["token", "listar", resto @ ..] => listar_tokens(resto),
         _ => Err(USO.to_string()),
     };
     match resultado {
@@ -98,14 +111,16 @@ fn abrir(resto: &[&str]) -> Result<Banco, String> {
 
 fn servir(resto: &[&str]) -> Result<(), String> {
     let endereco = opcao(resto, "--endereco", ENDERECO_PADRAO)?;
+    let drivers = Path::new(opcao(resto, "--drivers", DRIVERS_PADRAO)?);
     let banco = Arc::new(Mutex::new(abrir(resto)?));
     let execucao = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let estado = Estado::iniciar(banco, drivers).map_err(|e| e.to_string())?;
     execucao.block_on(async {
         let ouvinte = tokio::net::TcpListener::bind(endereco)
             .await
             .map_err(|e| format!("{endereco}: {e}"))?;
         eprintln!("remote-certificate atendendo em {endereco}");
-        servico::servir(ouvinte, banco)
+        servico::servir(ouvinte, estado)
             .await
             .map_err(|e| e.to_string())
     })
@@ -209,7 +224,9 @@ fn trocar_pin(nome: &str, resto: &[&str]) -> Result<(), String> {
 
 fn listar_dispositivos(resto: &[&str]) -> Result<(), String> {
     for d in abrir(resto)?.dispositivos().map_err(|e| e.to_string())? {
-        let estado = if d.erros_seguidos >= ERROS_PARA_BLOQUEAR {
+        let estado = if d.revogado {
+            "revogado"
+        } else if d.erros_seguidos >= ERROS_PARA_BLOQUEAR {
             "bloqueado"
         } else {
             "ativo"
@@ -225,6 +242,74 @@ fn desbloquear(id: &str, resto: &[&str]) -> Result<(), String> {
         return Err(format!("não há dispositivo {id}"));
     }
     println!("dispositivo {id} desbloqueado");
+    Ok(())
+}
+
+fn revogar(id: &str, resto: &[&str]) -> Result<(), String> {
+    let id: IdDoDispositivo = id.parse().map_err(|_| USO.to_string())?;
+    if !abrir(resto)?.revogar(id).map_err(|e| e.to_string())? {
+        return Err(format!("não há dispositivo {id}"));
+    }
+    println!("dispositivo {id} revogado");
+    Ok(())
+}
+
+fn criar_token(nome: &str, driver: &str, resto: &[&str]) -> Result<(), String> {
+    let (opcoes, argumentos) = match resto.iter().position(|a| *a == "--") {
+        Some(i) => (&resto[..i], &resto[i + 1..]),
+        None => (resto, &[][..]),
+    };
+    let argumentos: Vec<String> = argumentos.iter().map(|a| a.to_string()).collect();
+    abrir(opcoes)?
+        .criar_token(nome, driver, &argumentos)
+        .map_err(|e| e.to_string())?;
+    println!("token {nome} criado; falta configurar");
+    Ok(())
+}
+
+/// Sobe o driver, pergunta os campos que ele declara e guarda o que o
+/// `configurar` deixar. Com o serviço rodando, ele relança o driver do token.
+fn configurar_token(nome: &str, resto: &[&str]) -> Result<(), String> {
+    let drivers = Path::new(opcao(resto, "--drivers", DRIVERS_PADRAO)?);
+    let banco = Arc::new(Mutex::new(abrir(resto)?));
+    let registro = travar(&banco)
+        .token(nome)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("não há token {nome}"))?;
+    let driver =
+        Driver::lancar(Command::new(drivers.join(&registro.driver)).args(&registro.argumentos))
+            .map_err(|e| e.to_string())?;
+    let campos = driver.apresentacao().configuracao.clone();
+    let mut token =
+        Token::abrir(driver, GuardaNoBanco::novo(banco, registro.id)).map_err(|e| e.to_string())?;
+    let mut valores = BTreeMap::new();
+    for campo in campos {
+        let pergunta = format!("{}: ", campo.rotulo);
+        let valor = if campo.secreto && io::stdin().is_terminal() {
+            sem_eco(&pergunta)?
+        } else {
+            if io::stdin().is_terminal() {
+                eprint!("{pergunta}");
+            }
+            ler_linha()?
+        };
+        valores.insert(campo.nome, sem_quebra(valor));
+    }
+    token.configurar(valores).map_err(|e| e.to_string())?;
+    println!("token {nome} configurado");
+    Ok(())
+}
+
+fn listar_tokens(resto: &[&str]) -> Result<(), String> {
+    let banco = abrir(resto)?;
+    for token in banco.tokens().map_err(|e| e.to_string())? {
+        let estado = match banco.desatualizado(token.id).map_err(|e| e.to_string())? {
+            Some(nomes) => format!("parado ({} recusado)", nomes.join(", ")),
+            None if token.geracao == 0 => "não configurado".to_string(),
+            None => "ativo".to_string(),
+        };
+        println!("{}\t{}\t{estado}", token.nome, token.driver);
+    }
     Ok(())
 }
 

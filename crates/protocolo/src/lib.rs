@@ -4,7 +4,7 @@
 //! O servidor o lança e conversa com ele em JSON, uma mensagem por linha, pelo
 //! stdin e pelo stdout do driver. O formato completo está em `docs/drivers.md`.
 
-mod b64;
+pub mod b64;
 mod linha;
 mod mecanismo;
 mod mensagem;

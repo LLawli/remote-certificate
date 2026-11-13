@@ -101,8 +101,12 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   O segredo tem 80 bits e vale por 10 minutos, uma vez; o banco guarda o
   SHA-256 dele.
 - Um código vazado deixa alguém parear no lugar da pessoa, dentro do prazo. O
-  dispositivo dele ainda depende do PIN pessoal dela, e o administrador vê o
-  dispositivo a mais em `dispositivo listar`.
+  dispositivo dele ainda depende do PIN pessoal dela, o administrador vê o
+  dispositivo a mais em `dispositivo listar` e o tira com
+  `dispositivo revogar`. A conexão aberta de um dispositivo revogado cai na
+  mensagem seguinte.
+- No WebSocket do agente, uma mensagem tem no máximo 4 MiB, e o servidor
+  espera a pessoa responder um fator por 3 minutos antes de cancelar.
 
 ### Mensagens de fora
 

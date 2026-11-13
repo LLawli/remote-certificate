@@ -2,6 +2,7 @@
 //! fixadas, o pareamento e os códigos que uma pessoa copia. O desenho está em
 //! `docs/arquitetura.md`.
 
+pub mod agente;
 pub mod codigo;
 pub mod pareamento;
 pub mod tls;

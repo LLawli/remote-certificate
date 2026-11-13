@@ -10,12 +10,14 @@ use http_body_util::Empty;
 use hyper::header::HOST;
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
+use protocolo::Mecanismo;
 use protocolo::Segredo;
+use rede::agente::{Aviso, Conexao, DoAgente, DoServidor, FalhaDoAgente, TipoDeFalha};
 use rede::pareamento::{self, CodigoDePareamento, FalhaDoPareamento, Pareado};
 use rede::tls::{self, Fixacao, Identidade};
-use servidor::banco::{Banco, ChaveDoBanco, IdDoUsuario, ler_chave, travar};
+use servidor::banco::{Banco, ChaveDoBanco, IdDoDispositivo, IdDoUsuario, ler_chave, travar};
 use servidor::pin;
-use servidor::servico::{self, agora};
+use servidor::servico::{self, Estado, agora};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
@@ -46,7 +48,9 @@ async fn subir(nome: &str) -> Servidor {
     let banco = Arc::new(Mutex::new(abrir(&dir)));
     let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endereco = ouvinte.local_addr().unwrap().to_string();
-    tokio::spawn(servico::servir(ouvinte, banco.clone()));
+    // Sem tokens no banco: nenhum driver sobe.
+    let estado = Estado::iniciar(banco.clone(), Path::new("/sem-drivers")).unwrap();
+    tokio::spawn(servico::servir(ouvinte, estado));
     Servidor {
         endereco,
         banco,
@@ -267,4 +271,180 @@ async fn a_identidade_do_servidor_sobrevive_ao_reinicio() {
     let antes = servico::identidade(&servidor.banco).unwrap().impressao();
     let reaberto = Mutex::new(abrir(&servidor.dir));
     assert_eq!(servico::identidade(&reaberto).unwrap().impressao(), antes);
+}
+
+/// Um agente pareado e conectado.
+async fn agente(servidor: &Servidor) -> (Conexao, Identidade, Pareado) {
+    let (identidade, pareado) = servidor.parear("notebook").await;
+    let conexao = Conexao::abrir(&servidor.endereco, &identidade, pareado.servidor)
+        .await
+        .expect("conecta");
+    (conexao, identidade, pareado)
+}
+
+/// A resposta à mensagem. Os avisos chegam a qualquer hora e ficam de fora.
+async fn pedir_ao_servidor(conexao: &mut Conexao, mensagem: DoAgente) -> DoServidor {
+    conexao.enviar(&mensagem).await.unwrap();
+    loop {
+        match conexao.receber().await.unwrap() {
+            DoServidor::Aviso { .. } => continue,
+            resposta => return resposta,
+        }
+    }
+}
+
+fn entrar(pin: &str) -> DoAgente {
+    DoAgente::Entrar {
+        id: 1,
+        pin: Segredo::novo(pin.into()),
+    }
+}
+
+fn tipo_da_falha(resposta: &DoServidor) -> Option<TipoDeFalha> {
+    match resposta {
+        DoServidor::Falha { erro, .. } => Some(erro.tipo),
+        _ => None,
+    }
+}
+
+fn assinar(id: u64, token: &str) -> DoAgente {
+    DoAgente::Assinar {
+        id,
+        token: token.into(),
+        chave: "k".into(),
+        mecanismo: Mecanismo::Sha256RsaPkcs,
+        dados: b"documento".to_vec(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sem_o_pin_pessoal_nao_assina() {
+    let servidor = subir("agente-sem-pin").await;
+    let (mut conexao, _, _) = agente(&servidor).await;
+
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(2, "RemoteID")).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::NaoAutenticado));
+
+    // Sem tokens no banco, a lista vem vazia, e listar não pede o PIN.
+    let resposta = pedir_ao_servidor(&mut conexao, DoAgente::Listar { id: 3 }).await;
+    assert_eq!(
+        resposta,
+        DoServidor::Chaves {
+            id: 3,
+            chaves: vec![]
+        }
+    );
+
+    // Com o PIN, passa da autenticação e chega ao token.
+    assert_eq!(
+        pedir_ao_servidor(&mut conexao, entrar("2468")).await,
+        DoServidor::Entrou { id: 1 }
+    );
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(4, "RemoteID")).await;
+    assert_eq!(
+        tipo_da_falha(&resposta),
+        Some(TipoDeFalha::TokenDesconhecido)
+    );
+
+    // Depois de sair, volta a pedir o PIN.
+    assert_eq!(
+        pedir_ao_servidor(&mut conexao, DoAgente::Sair { id: 5 }).await,
+        DoServidor::Saiu { id: 5 }
+    );
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(6, "RemoteID")).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::NaoAutenticado));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tres_pins_errados_bloqueiam_e_avisam_as_outras_conexoes() {
+    let servidor = subir("agente-bloqueio").await;
+    let (mut conexao, identidade, pareado) = agente(&servidor).await;
+    let mut outra = Conexao::abrir(&servidor.endereco, &identidade, pareado.servidor)
+        .await
+        .unwrap();
+
+    let resposta = pedir_ao_servidor(&mut conexao, entrar("0000")).await;
+    assert!(matches!(
+        resposta,
+        DoServidor::Falha { ref erro, .. }
+            if erro.tipo == TipoDeFalha::PinErrado && erro.restantes == Some(2)
+    ));
+    pedir_ao_servidor(&mut conexao, entrar("0000")).await;
+    let resposta = pedir_ao_servidor(&mut conexao, entrar("0000")).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::Bloqueado));
+
+    assert_eq!(
+        outra.receber().await.unwrap(),
+        DoServidor::Aviso {
+            aviso: Aviso::DispositivoBloqueado
+        }
+    );
+    // Bloqueado, nem listar nem o PIN certo passam.
+    let resposta = pedir_ao_servidor(&mut outra, DoAgente::Listar { id: 9 }).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::Bloqueado));
+    let resposta = pedir_ao_servidor(&mut conexao, entrar("2468")).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::Bloqueado));
+
+    // O administrador desbloqueia (dispositivo desbloquear).
+    let dispositivo: IdDoDispositivo = pareado.dispositivo.to_string().parse().unwrap();
+    assert!(travar(&servidor.banco).zerar_erros(dispositivo).unwrap());
+    assert_eq!(
+        pedir_ao_servidor(&mut conexao, entrar("2468")).await,
+        DoServidor::Entrou { id: 1 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revogado_cai_no_handshake_e_na_conexao_aberta() {
+    let servidor = subir("agente-revogado").await;
+    let (mut conexao, identidade, pareado) = agente(&servidor).await;
+
+    let dispositivo: IdDoDispositivo = pareado.dispositivo.to_string().parse().unwrap();
+    assert!(travar(&servidor.banco).revogar(dispositivo).unwrap());
+
+    // A conexão aberta cai na próxima mensagem.
+    conexao.enviar(&DoAgente::Listar { id: 1 }).await.unwrap();
+    assert!(matches!(
+        conexao.receber().await,
+        Err(FalhaDoAgente::Fechada | FalhaDoAgente::WebSocket(_))
+    ));
+    // Uma nova nem passa do handshake.
+    let falha = Conexao::abrir(&servidor.endereco, &identidade, pareado.servidor).await;
+    assert!(
+        matches!(falha, Err(FalhaDoAgente::Recusado)),
+        "{:?}",
+        falha.err()
+    );
+    assert!(travar(&servidor.banco).dispositivos().unwrap()[0].revogado);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mensagem_fora_do_protocolo_e_respondida_sem_derrubar() {
+    let servidor = subir("agente-lixo").await;
+    let (identidade, pareado) = servidor.parear("notebook").await;
+    let conexao = pareamento::conectar(
+        &servidor.endereco,
+        &identidade,
+        Fixacao::Completa(pareado.servidor),
+    )
+    .await
+    .unwrap();
+    let (mut ws, _) = tokio_tungstenite::client_async(
+        format!("wss://remote-certificate{}", rede::agente::CAMINHO),
+        conexao,
+    )
+    .await
+    .unwrap();
+    use futures_util::{SinkExt, StreamExt};
+    ws.send(tokio_tungstenite::tungstenite::Message::text(
+        r#"{"tipo":"formatar_disco"}"#,
+    ))
+    .await
+    .unwrap();
+    let resposta = ws.next().await.unwrap().unwrap().into_text().unwrap();
+    let resposta: DoServidor = serde_json::from_str(&resposta).unwrap();
+    assert!(matches!(
+        resposta,
+        DoServidor::Falha { id: None, ref erro } if erro.tipo == TipoDeFalha::PedidoInvalido
+    ));
 }

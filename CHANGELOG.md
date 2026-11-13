@@ -38,6 +38,13 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - `remote-certificate dispositivo parear <usuario> <nome>`: um código de
   pareamento de uso único, que vale por 10 minutos e traz a impressão da chave
   do servidor.
+- `/v1/agente`: o WebSocket do agente da estação. Entra com o PIN pessoal,
+  lista as chaves de todos os tokens e assina, com o pedido do OTP no meio da
+  assinatura. Avisa quando o dispositivo é bloqueado e quando um token para.
+- `remote-certificate token criar|configurar|listar`. Configurar com o serviço
+  rodando relança o driver daquele token.
+- `remote-certificate dispositivo revogar`: a chave do dispositivo deixa de
+  ser aceita, inclusive numa conexão já aberta.
 - O container sobe com `servir`; `PUBLICAR` escolhe onde a porta aparece no
   host (o IP da tailnet, por exemplo).
 - O servidor e o driver RemoteID não se deixam inspecionar por outro processo

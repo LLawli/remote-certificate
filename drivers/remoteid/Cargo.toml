@@ -20,7 +20,9 @@ serde_json.workspace = true
 sha2 = "0.11"
 
 [dev-dependencies]
+rede = { path = "../../crates/rede" }
 servidor = { path = "../../crates/servidor" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 rsa = { version = "0.10", features = ["pkcs1v15"] }
 sha1 = "0.11"
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
