@@ -1,0 +1,4 @@
+/target
+# Segredos e infraestrutura: só os gêmeos .example vão para o repositório.
+.env
+/config/deploy.env

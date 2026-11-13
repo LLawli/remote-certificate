@@ -1,0 +1,10 @@
+services:
+  remote-certificate:
+    image: ${IMAGEM:-remote-certificate}:${TAG:-latest}
+    restart: unless-stopped
+    volumes:
+      - dados:/dados
+      - ./drivers:/drivers:ro
+
+volumes:
+  dados:

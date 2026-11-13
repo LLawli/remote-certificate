@@ -1,0 +1,4 @@
+# Ferramentas dos gates que não vêm do cargo, nas mesmas versões aqui e no CI.
+[tools]
+shellcheck = "0.11.0"
+actionlint = "1.7.12"

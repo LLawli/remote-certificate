@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Publica o servidor: constrói a imagem, envia ao registro e atualiza o host.
+# Lê REGISTRO, IMAGEM, HOST_SSH e CAMINHO_REMOTO de config/deploy.env.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+config=config/deploy.env
+if [[ ! -f $config ]]; then
+    echo "falta $config (modelo em $config.example)" >&2
+    exit 1
+fi
+# shellcheck source=config/deploy.env.example
+source "$config"
+
+# O commit do working copy (@) no jj; num clone só com git, o HEAD.
+tag=$(jj log -r @ --no-graph -T 'commit_id.short(12)' 2>/dev/null \
+    || git rev-parse --short=12 HEAD)
+referencia="$REGISTRO/$IMAGEM"
+
+docker build -t "$referencia:$tag" -t "$referencia:latest" .
+docker push "$referencia:$tag"
+docker push "$referencia:latest"
+
+# shellcheck disable=SC2029  # as variáveis expandem aqui de propósito
+ssh "$HOST_SSH" "cd '$CAMINHO_REMOTO' && IMAGEM='$referencia' TAG='$tag' docker compose pull && IMAGEM='$referencia' TAG='$tag' docker compose up -d"
