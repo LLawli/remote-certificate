@@ -32,3 +32,7 @@ scripts/ci.sh    # formatação, clippy, testes, auditoria de dependências, she
 ```
 
 O contrato entre o servidor e os drivers está em [docs/drivers.md](docs/drivers.md).
+
+## Licença
+
+[AGPL-3.0](LICENSE).
