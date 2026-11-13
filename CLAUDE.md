@@ -14,6 +14,9 @@ HTTP).
 - Um driver é um executável à parte, instalado só por quem tem aquele token. O
   servidor nunca depende de um driver como crate nem o traz na imagem base.
 - O servidor fala com os drivers só pelo contrato de `docs/drivers.md`.
+- Não existe driver genérico. Um tipo de token só é suportado quando tem um
+  driver próprio aceito em `drivers/<nome>/`, com o Dockerfile da imagem
+  derivada e os testes; a tradução das manias do fornecedor é do driver.
 - As capacidades vêm do driver. O cliente nunca expõe um mecanismo que o driver
   não declarou (um token sem RSA-PSS nem ECDSA não se anuncia para TLS 1.3).
 

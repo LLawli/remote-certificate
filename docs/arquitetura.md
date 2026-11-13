@@ -14,7 +14,7 @@ o contrato dos drivers, em [drivers.md](drivers.md).
  │  face (.so) ── IPC ──▶ agente ◀────────▶ │  segredos cifrados            │
  │                 chave do dispositivo     │   │ JSON por linha (stdio)    │
  └──────────────────────────┘   pareada     │   ├─▶ driver remoteid ─▶ Certisign
-                                            │   └─▶ driver pkcs11 ─▶ token USB
+                                            │   └─▶ driver gdburti ─▶ token USB
  sistema interno ──── API HTTP ───────────▶ │                               │
                                             └───────────────────────────────┘
 ```
@@ -27,7 +27,11 @@ o contrato dos drivers, em [drivers.md](drivers.md).
   tem aquele token. O servidor de quem tem um GD Burti físico não carrega o
   RemoteID. O servidor lança um processo por token configurado e conversa pelo
   contrato de [drivers.md](drivers.md) (`crates/protocolo`). Processo separado
-  também isola o servidor de um módulo de fornecedor que trava ou vaza memória.
+  também isola o servidor de um módulo de fornecedor que trava ou vaza memória,
+  e um token que trava não para os outros.
+- **Administração**: uma CLI no próprio servidor (`docker compose exec`):
+  configurar token, criar usuário, parear dispositivo, desbloquear. Se um dia
+  precisar de mais, no máximo uma API de administração, sem interface web.
 - **Cliente da estação**: um agente e as faces (abaixo).
 - **Sistemas integrados**: falam com a API HTTP do servidor.
 
@@ -41,6 +45,11 @@ PIN, repassar o PIN pessoal de cada um ou criar um PIN interno. As operações s
 as mesmas do driver (listar chaves e mecanismos, assinar). Quando o token pede
 um fator da pessoa (o OTP), a assinatura volta pedindo esse fator, com o rótulo
 para mostrar, e o sistema completa a mesma operação com o código.
+
+O escopo inicial é só esse. A API nasce versionada (`/v1`) e com a operação
+de assinatura como recurso próprio (criar, responder fatores, consultar), para
+que operações novas (assinar em lote, outros formatos) entrem sem quebrar quem
+já integra.
 
 ### Token virtual, para estações
 
@@ -66,7 +75,13 @@ duas camadas:
 A face expõe só o que o driver declara. Um token sem RSA-PSS nem ECDSA não se
 anuncia para TLS 1.3 (`protocolo::suporta_tls13`).
 
+O cliente é testado numa VM com o ambiente da estação (os navegadores e os
+assinadores instalados de verdade), não só na máquina de desenvolvimento.
+
 ## Segurança
+
+O modelo de ameaça, as defesas de cada peça e os riscos aceitos estão em
+[seguranca.md](seguranca.md).
 
 ### Pareamento
 
@@ -75,7 +90,36 @@ administrador gera no servidor um código de uso único; com ele, cliente e
 servidor trocam as chaves públicas: o servidor guarda a do dispositivo, o
 cliente fixa a do servidor. Uma conexão de chave desconhecida é recusada antes
 de qualquer operação, então uma URL vazada, sozinha, não serve para nada, mesmo
-com o servidor na internet. A forma do transporte é uma decisão aberta (abaixo).
+com o servidor na internet.
+
+### Transporte
+
+mTLS (TLS 1.3) dos dois lados, sem autoridade certificadora: o certificado de
+cada lado é autoassinado e o que vale é a chave dentro dele. O servidor confere
+a chave do cliente contra os dispositivos pareados e derruba o handshake de uma
+chave desconhecida, antes de ler qualquer HTTP; o cliente confere a do servidor
+contra a que fixou no pareamento.
+
+- O agente da estação mantém um WebSocket aberto sobre esse mTLS. Por ele o
+  servidor pede o OTP no meio de uma assinatura e avisa o que mudou sem ser
+  perguntado (token desatualizado, dispositivo bloqueado, certificado novo).
+- Os sistemas usam a API HTTP comum sobre o mesmo mTLS, que qualquer linguagem
+  fala com um certificado de cliente.
+- A chave do dispositivo só precisa assinar, então pode ficar em hardware (TPM,
+  Secure Enclave) quando o cliente desses sistemas chegar.
+
+Como o TLS precisa chegar inteiro ao servidor, um proxy no meio só repassa a
+conexão, sem abri-la. A forma recomendada de expor o servidor é o Tailscale:
+as estações falam com o IP dele na tailnet, sem proxy. O servidor não depende
+do Tailscale; a tailnet controla quem alcança a rede, o pareamento controla quem
+é atendido.
+
+Ficaram de fora o Noise IK sobre WebSocket (a conexão nos dois sentidos vem do
+WebSocket, não do Noise; ele exigiria uma biblioteca Noise de quem integra e
+não aceita chave em TPM) e a assinatura de cada requisição HTTP pela RFC 9421
+(recusa só depois do HTTP, proteção contra repetição por nossa conta). O Noise
+volta a fazer sentido se for preciso atender por um proxy que abre o TLS, como
+o Cloudflare Tunnel.
 
 ### PIN pessoal e bloqueio
 
@@ -91,8 +135,12 @@ com o servidor na internet. A forma do transporte é uma decisão aberta (abaixo
 
 ### Segredos guardados
 
-O PIN do token e as senhas de conta (fatores `guardado`) ficam cifrados em
-repouso com uma chave mestra (AEAD). Se o token recusar um fator guardado
+Todo o estado do servidor fica num único SQLite cifrado com SQLCipher: usuários,
+PINs pessoais, dispositivos, tokens, os fatores `guardado` (PIN do token,
+senhas de conta) e a auditoria. A chave do banco vem de um secret do Docker; o
+servidor não prevê rodar fora de container. Quem tem o volume sem o secret não
+lê nada; quem tem os dois lê tudo, e o serviço volta sozinho depois de
+reiniciar. Se o token recusar um fator guardado
 (`fator_recusado`), o servidor não tenta de novo sozinho, porque um token físico
 trava depois de poucas tentativas: ele marca o segredo como desatualizado e para
 de usar aquele token até o administrador corrigir.
@@ -108,9 +156,12 @@ entram, nem em log. `protocolo::Segredo` não aparece em `Debug` por isso.
 - Imagem final com glibc (Debian slim), porque os módulos PKCS#11 dos
   fornecedores de token físico são compilados para glibc. Roda como usuário não
   root.
-- Estado em `/dados` (volume): banco, segredos cifrados, auditoria.
-- Drivers em `/drivers`, por volume ou por uma imagem derivada
-  (`FROM ... COPY driver /drivers/`). A imagem base não traz driver nenhum.
+- Estado em `/dados` (volume): o banco SQLCipher. A chave dele, num secret do
+  Docker.
+- A imagem base não traz driver nenhum. Cada driver aceito tem um Dockerfile em
+  `drivers/<nome>/` que gera uma imagem derivada da base com o driver e o que
+  ele precisa (`FROM ... COPY ... /drivers/`). Quem tem dois tipos de token
+  junta os dois numa imagem sua.
 - Token físico plugado no servidor: pelo `pcscd` do host com o socket
   `/run/pcscd` montado no container, ou pelo dispositivo USB passado ao
   container. A escolha depende de medir com um token real.
@@ -133,36 +184,30 @@ crate: o servidor não carrega o RemoteID.
   o caminho do aplicativo oficial. `CKM_SHA384_RSA_PKCS`,
   `CKM_SHA512_RSA_PKCS` e `CKM_RSA_PKCS` vão como um DigestInfo pronto
   (`digest_info`), que o `servir` aceita desde a v0.5.1 do RemoteID-linux, a
-  mesma que traz o DER do certificado na visão. O driver exige essa versão.
+  mesma que traz o DER do certificado na visão. O driver exige essa versão e
+  reconhece uma anterior pelo que falta no protocolo (o `remoteid` não diz a
+  versão), respondendo `versao_incompativel`.
 - A Certisign não assina RSA-PSS: o driver não declara `CKM_RSA_PKCS_PSS`, e o
   token virtual não se anuncia para TLS 1.3.
 
-## Próximo driver: pkcs11 genérico
+## Novos drivers
 
-Carrega o módulo PKCS#11 do fornecedor (por exemplo o SafeSign de um GD Burti)
-e traduz o contrato para chamadas Cryptoki. O PIN do token é `guardado`. Um
-driver só cobre a maior parte dos tokens A3 físicos.
+Não há driver PKCS#11 genérico, e o projeto não declara suporte genérico a
+tokens. Muitos módulos de fornecedor seguem mal o padrão PKCS#11, e quem
+conhece o token é quem lida com isso: cada driver traduz o próprio token para o
+contrato de [drivers.md](drivers.md) e entra no repositório em `drivers/<nome>/`,
+com o Dockerfile e os testes dele. Um token só é suportado quando tem um driver
+aceito aqui.
 
-## Decisões abertas
+## Decisões tomadas
 
-Cada uma se decide medindo, não por preferência.
-
-1. **Transporte entre cliente e servidor.**
-   - (a) mTLS com uma AC própria do servidor, que assina o certificado do
-     cliente no pareamento. Recusa no handshake; qualquer cliente HTTP fala
-     (`curl --cert`). Atrás de proxy reverso exige passthrough de TLS.
-   - (b) Noise IK sobre WebSocket: chaves estáticas fixadas dos dois lados e
-     sigilo futuro. Quem integra precisa de uma biblioteca Noise.
-   - (c) HTTPS comum e cada requisição assinada com a chave P-256 (RFC 9421).
-     Passa por qualquer proxy, mas a recusa só acontece depois do TLS, e quem
-     integra assina cada requisição.
-
-   A medir: custo de integração num cliente HTTP comum, latência do handshake e
-   comportamento atrás de Caddy e Traefik.
-2. **Origem da chave mestra.** Arquivo ou secret do Docker (o serviço volta
-   sozinho depois de reiniciar; quem lê o volume e o secret lê tudo) ou
-   desbloqueio pelo administrador a cada partida (mais seguro, serviço parado
-   até alguém desbloquear).
-3. **Banco.** SQLite em `/dados` é o candidato.
-4. **Processos de driver.** Um processo por token configurado (isolamento,
-   simples) ou um por driver com vários tokens (menos processos).
+- **Transporte**: mTLS com chaves fixadas, WebSocket para o agente; exposição
+  recomendada pelo Tailscale.
+- **Chave do banco**: secret do Docker. O servidor não prevê rodar fora de
+  container. O desbloqueio pelo administrador a cada partida ficou de fora:
+  deixaria o serviço parado depois de toda queda até alguém aparecer.
+- **Banco**: um SQLite em `/dados`, cifrado inteiro com SQLCipher. Os segredos
+  não têm uma camada de cifra própria por cima.
+- **Processos de driver**: um por token configurado.
+- **Administração**: CLI.
+- **Drivers**: um por tipo de token, aceito no repositório; nenhum genérico.

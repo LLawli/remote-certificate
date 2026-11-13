@@ -1,9 +1,11 @@
 # Contrato de driver (v0, rascunho)
 
 Um driver é o que sabe falar com um tipo de token. É um executável à parte,
-instalado só por quem tem aquele token, e qualquer linguagem serve. Os tipos em
-Rust estão em `crates/protocolo`, e os testes de lá mostram cada mensagem no
-fio.
+instalado só por quem tem aquele token, e qualquer linguagem serve. Um driver
+aceito fica em `drivers/<nome>/`, com um Dockerfile que gera a imagem do
+servidor com ele dentro, e lida sozinho com as particularidades do token: não
+há camada genérica por baixo. Os tipos em Rust estão em `crates/protocolo`, e
+os testes de lá mostram cada mensagem no fio.
 
 ## Como o servidor roda um driver
 
