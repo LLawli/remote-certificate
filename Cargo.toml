@@ -21,3 +21,11 @@ zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+# O Argon2id do PIN pessoal sem otimização leva centenas de milissegundos por
+# conferência e deixa os testes lentos.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

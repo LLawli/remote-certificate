@@ -12,9 +12,11 @@ name = "remote-certificate"
 path = "src/main.rs"
 
 [dependencies]
+argon2 = { version = "0.6", features = ["zeroize"] }
 data-encoding = "2"
 memoria.workspace = true
 protocolo.workspace = true
+rustix = { version = "1", features = ["termios"] }
 # SQLCipher com o OpenSSL compilado junto: a imagem final não precisa de libssl.
 rusqlite = { version = "0.42", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde.workspace = true

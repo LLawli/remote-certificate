@@ -1,12 +1,16 @@
-//! O serviço. Por enquanto, os comandos de quem opera: o backup e o código de
-//! recuperação. O desenho está em `docs/arquitetura.md`.
+//! O serviço. Por enquanto, os comandos de quem opera: o backup, o código de
+//! recuperação, os usuários e os dispositivos. O desenho está em
+//! `docs/arquitetura.md`.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, ler_chave};
+use protocolo::Segredo;
+use rustix::termios::{self, LocalModes, OptionalActions};
+use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave};
+use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
 use servidor::recuperacao::{self, CodigoInvalido};
 use zeroize::Zeroizing;
 
@@ -19,7 +23,12 @@ uso: remote-certificate <comando>
   recuperacao mostrar [--chave <arquivo>]
                      mostra o código de recuperação da chave do banco, uma vez
   recuperacao restaurar
-                     lê o código no stdin e escreve a chave no stdout";
+                     lê o código no stdin e escreve a chave no stdout
+  usuario criar <nome>     [--banco <arquivo>] [--chave <arquivo>]
+  usuario pin <nome>       [--banco <arquivo>] [--chave <arquivo>]
+                     o PIN pessoal vem do stdin (pedido duas vezes num terminal)
+  dispositivo listar       [--banco <arquivo>] [--chave <arquivo>]
+  dispositivo desbloquear <id> [--banco <arquivo>] [--chave <arquivo>]";
 
 /// Limpa a tela e o histórico do terminal, para o código não ficar ali.
 const LIMPAR_TERMINAL: &str = "\x1b[2J\x1b[3J\x1b[H";
@@ -43,6 +52,10 @@ fn main() -> ExitCode {
         ["backup", destino, resto @ ..] => backup(destino, resto),
         ["recuperacao", "mostrar", resto @ ..] => mostrar(resto),
         ["recuperacao", "restaurar"] => restaurar(),
+        ["usuario", "criar", nome, resto @ ..] => criar_usuario(nome, resto),
+        ["usuario", "pin", nome, resto @ ..] => trocar_pin(nome, resto),
+        ["dispositivo", "listar", resto @ ..] => listar_dispositivos(resto),
+        ["dispositivo", "desbloquear", id, resto @ ..] => desbloquear(id, resto),
         _ => Err(USO.to_string()),
     };
     match resultado {
@@ -68,11 +81,14 @@ fn opcao(resto: &[&str], nome: &str, padrao: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(valor))
 }
 
-fn backup(destino: &str, resto: &[&str]) -> Result<(), String> {
+/// O banco de `--banco`, aberto com a chave de `--chave`.
+fn abrir(resto: &[&str]) -> Result<Banco, String> {
     let chave = ler_chave(&opcao(resto, "--chave", CHAVE_PADRAO)?).map_err(|e| e.to_string())?;
-    let banco =
-        Banco::abrir(&opcao(resto, "--banco", BANCO_PADRAO)?, chave).map_err(|e| e.to_string())?;
-    banco
+    Banco::abrir(&opcao(resto, "--banco", BANCO_PADRAO)?, chave).map_err(|e| e.to_string())
+}
+
+fn backup(destino: &str, resto: &[&str]) -> Result<(), String> {
+    abrir(resto)?
         .backup(&PathBuf::from(destino))
         .map_err(|e| e.to_string())?;
     println!("backup conferido: {destino}");
@@ -122,6 +138,85 @@ fn restaurar() -> Result<(), String> {
         .write_all(chave.expor())
         .and_then(|()| saida.flush())
         .map_err(|e| e.to_string())
+}
+
+fn criar_usuario(nome: &str, resto: &[&str]) -> Result<(), String> {
+    let banco = abrir(resto)?;
+    if banco.usuario(nome).map_err(|e| e.to_string())?.is_some() {
+        return Err(format!("o usuário {nome} já existe"));
+    }
+    let hash = pin::hash(&ler_pin()?).map_err(|e| e.to_string())?;
+    banco
+        .criar_usuario(nome, &hash)
+        .map_err(|e| e.to_string())?;
+    println!("usuário {nome} criado");
+    Ok(())
+}
+
+fn trocar_pin(nome: &str, resto: &[&str]) -> Result<(), String> {
+    let banco = abrir(resto)?;
+    let usuario = banco
+        .usuario(nome)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("não há usuário {nome}"))?;
+    let hash = pin::hash(&ler_pin()?).map_err(|e| e.to_string())?;
+    banco
+        .trocar_pin(usuario, &hash)
+        .map_err(|e| e.to_string())?;
+    println!("PIN pessoal de {nome} trocado");
+    Ok(())
+}
+
+fn listar_dispositivos(resto: &[&str]) -> Result<(), String> {
+    for d in abrir(resto)?.dispositivos().map_err(|e| e.to_string())? {
+        let estado = if d.erros_seguidos >= ERROS_PARA_BLOQUEAR {
+            "bloqueado"
+        } else {
+            "ativo"
+        };
+        println!("{}\t{}\t{}\t{estado}", d.id, d.usuario, d.nome);
+    }
+    Ok(())
+}
+
+fn desbloquear(id: &str, resto: &[&str]) -> Result<(), String> {
+    let id: IdDoDispositivo = id.parse().map_err(|_| USO.to_string())?;
+    if !abrir(resto)?.zerar_erros(id).map_err(|e| e.to_string())? {
+        return Err(format!("não há dispositivo {id}"));
+    }
+    println!("dispositivo {id} desbloqueado");
+    Ok(())
+}
+
+/// O PIN pessoal novo: num terminal, sem eco e duas vezes; fora dele, a
+/// primeira linha do stdin. Nunca por argumento, que fica no histórico e no
+/// `ps`.
+fn ler_pin() -> Result<Segredo, String> {
+    if !io::stdin().is_terminal() {
+        return Ok(sem_quebra(ler_linha()?));
+    }
+    let pin = sem_eco("PIN pessoal: ")?;
+    if sem_eco("Repita o PIN: ")?.as_str() != pin.as_str() {
+        return Err("os dois PINs não conferem".into());
+    }
+    Ok(sem_quebra(pin))
+}
+
+fn sem_eco(pergunta: &str) -> Result<Zeroizing<String>, String> {
+    eprint!("{pergunta}");
+    let entrada = io::stdin();
+    let normal = termios::tcgetattr(&entrada).map_err(|e| e.to_string())?;
+    let mut mudo = normal.clone();
+    mudo.local_modes.remove(LocalModes::ECHO);
+    termios::tcsetattr(&entrada, OptionalActions::Now, &mudo).map_err(|e| e.to_string())?;
+    let linha = ler_linha();
+    let _ = termios::tcsetattr(&entrada, OptionalActions::Now, &normal);
+    eprintln!();
+    linha
+}
+
+fn sem_quebra(linha: Zeroizing<String>) -> Segredo {
+    Segredo::novo(linha.trim_end_matches(['\n', '\r']).to_string())
 }
 
 fn ler_linha() -> Result<Zeroizing<String>, String> {

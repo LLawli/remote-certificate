@@ -132,6 +132,15 @@ o Cloudflare Tunnel.
   servidor, e o servidor só o envia depois de validar o PIN pessoal: o token não
   recebe tentativa errada vinda de um usuário.
 - O OTP não tem contador: é de uso único, e quem o valida é o token.
+- Cada dispositivo é de um usuário só. Um sistema integrado é um usuário com o
+  dispositivo dele.
+- O administrador cria o usuário e troca o PIN pela CLI
+  (`remote-certificate usuario criar|pin <nome>`, com o PIN no stdin, nunca em
+  argumento), e vê e desbloqueia os dispositivos por ela
+  (`dispositivo listar`, `dispositivo desbloquear <id>`).
+- No código, `Token::assinar` exige um `pin::Autenticado`, que só
+  `pin::conferir` cria e que não carrega o PIN: sem conferir o PIN pessoal,
+  o fator guardado não sai do cofre.
 
 ### Segredos guardados
 

@@ -26,6 +26,12 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - `remote-certificate recuperacao`: o código de recuperação da chave do banco.
 - `bin/deploy chave`: gera a chave do banco no host, selada no TPM, e a abre
   em `/run` a cada boot.
+- Usuários com PIN pessoal em Argon2id e dispositivos de cada usuário. Errar
+  o PIN pessoal 3 vezes seguidas bloqueia o dispositivo, até o administrador
+  desbloquear; o acerto zera o contador. O fator guardado do token só é usado
+  depois de o PIN pessoal conferir, e o PIN pessoal nunca chega ao token.
+- `remote-certificate usuario criar|pin` e
+  `remote-certificate dispositivo listar|desbloquear`.
 - O servidor e o driver RemoteID não se deixam inspecionar por outro processo
   nem deixam core dump; o container roda só leitura e sem capabilities.
 - Uma linha do contrato de driver tem no máximo 1 MiB.

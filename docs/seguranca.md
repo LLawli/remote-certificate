@@ -63,6 +63,20 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   host novo a chave de um código. Perder a chave e o código perde usuários,
   pareamentos e auditoria; os tokens se configuram de novo.
 
+### PIN pessoal
+
+- Guardado em Argon2id com os parâmetros padrão do crate `argon2` (19 MiB,
+  2 passadas, 1 via: o mínimo da OWASP), que ficam no próprio hash. Subir os
+  parâmetros depois não invalida os PINs guardados. De 4 a 64 caracteres.
+- A tentativa conta como erro antes de o hash ser conferido, numa transação
+  `IMMEDIATE`, e o acerto zera o contador. Uma rajada de tentativas em paralelo
+  não ganha mais de 3 chutes, nem com a CLI aberta noutra conexão, e uma queda
+  no meio da conferência conta como erro.
+- Bloqueado, o dispositivo recusa até o PIN certo, sem conferir o hash: o
+  bloqueio não revela se o chute estava certo.
+- Com o banco aberto, um PIN de 4 dígitos cai por força bruta offline; quem
+  guarda o PIN pessoal de verdade é o SQLCipher. O Argon2id só encarece isso.
+
 ### Processo e container
 
 - Na partida: `PR_SET_DUMPABLE 0` (outro processo do mesmo usuário não faz

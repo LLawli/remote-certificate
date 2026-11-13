@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use protocolo::{Chave, Mecanismo, Segredo};
 
-use crate::banco::{Banco, FalhaDoBanco, IdDoToken};
+use crate::banco::{Banco, FalhaDoBanco, IdDoToken, travar};
 use crate::driver::{Conversa, Driver, Falha};
 use crate::fatores::{Decisao, Motivo, Pessoa, a_guardar, decidir};
+use crate::pin::Autenticado;
 
 /// O que a guarda tem de um token.
 pub struct Guardado {
@@ -38,17 +39,11 @@ impl GuardaNoBanco {
     pub fn novo(banco: Arc<Mutex<Banco>>, token: IdDoToken) -> GuardaNoBanco {
         GuardaNoBanco { banco, token }
     }
-
-    fn banco(&self) -> std::sync::MutexGuard<'_, Banco> {
-        // Um pânico com o banco na mão não deixa transação aberta (o SQLite
-        // desfaz a que não terminou), então o banco continua usável.
-        self.banco.lock().unwrap_or_else(|e| e.into_inner())
-    }
 }
 
 impl Guarda for GuardaNoBanco {
     fn carregar(&mut self) -> Result<Guardado, FalhaDoBanco> {
-        let banco = self.banco();
+        let banco = travar(&self.banco);
         Ok(Guardado {
             cofre: banco.cofre(self.token)?,
             desatualizado: banco.desatualizado(self.token)?,
@@ -56,11 +51,11 @@ impl Guarda for GuardaNoBanco {
     }
 
     fn configurado(&mut self, cofre: &BTreeMap<String, Segredo>) -> Result<(), FalhaDoBanco> {
-        self.banco().configurado(self.token, cofre)
+        travar(&self.banco).configurado(self.token, cofre)
     }
 
     fn desatualizado(&mut self, nomes: &[String]) -> Result<(), FalhaDoBanco> {
-        self.banco().marcar_desatualizado(self.token, nomes)
+        travar(&self.banco).marcar_desatualizado(self.token, nomes)
     }
 }
 
@@ -143,8 +138,11 @@ impl<C: Conversa, G: Guarda> Token<C, G> {
         Ok(self.driver.listar()?.chaves)
     }
 
+    /// Só depois do PIN pessoal: o fator guardado só sai do cofre para quem
+    /// passou por [`crate::pin::conferir`].
     pub fn assinar(
         &mut self,
+        _quem: &Autenticado,
         chave: &str,
         mecanismo: Mecanismo,
         dados: &[u8],
@@ -313,7 +311,13 @@ mod testes {
     fn pin_guardado_certo_assina_sem_perguntar_a_ninguem() {
         let mut guarda = guardado("4321");
         let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
-        let assinatura = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        let assinatura = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Ninguem,
+        );
         assert_eq!(assinatura.unwrap(), [1]);
     }
 
@@ -322,12 +326,24 @@ mod testes {
         let mut guarda = guardado("0000");
         let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
 
-        let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        let falha = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Ninguem,
+        );
         assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(ref n)) if n == &["pin"]));
         assert_eq!(token.driver().tentativas, 1);
 
         // Parado: o token físico não recebe nenhuma tentativa a mais.
-        let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        let falha = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Ninguem,
+        );
         assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(_))));
         assert_eq!(token.driver().tentativas, 1);
 
@@ -338,7 +354,13 @@ mod testes {
             Some(&["pin".to_string()][..])
         );
         let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
-        let falha = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        let falha = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Ninguem,
+        );
         assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(_))));
         assert_eq!(token.driver().tentativas, 0);
     }
@@ -349,12 +371,24 @@ mod testes {
         let mut token = Token::abrir(TokenComPin::novo("4321"), &mut guarda).unwrap();
         assert!(
             token
-                .assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem)
+                .assinar(
+                    &Autenticado::de_teste(),
+                    "k",
+                    Mecanismo::RsaPkcs,
+                    b"x",
+                    &mut Ninguem
+                )
                 .is_err()
         );
         let valores = cofre("4321");
         token.configurar(valores).unwrap();
-        let assinatura = token.assinar("k", Mecanismo::RsaPkcs, b"x", &mut Ninguem);
+        let assinatura = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Ninguem,
+        );
         assert_eq!(assinatura.unwrap(), [1]);
     }
 }

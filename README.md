@@ -16,8 +16,8 @@ nos próprios sistemas internos.
   assinatura acontece no servidor.
 - **API HTTP** para sistemas internos assinarem com o mesmo token.
 - **Um PIN por pessoa**, para saber quem assinou o quê. O PIN do token fica
-  cifrado no servidor e ninguém precisa conhecê-lo. Errar o PIN pessoal várias
-  vezes bloqueia o computador; o OTP, quando o token pede, vem da pessoa.
+  cifrado no servidor e ninguém precisa conhecê-lo. Errar o PIN pessoal 3 vezes
+  seguidas bloqueia o computador; o OTP, quando o token pede, vem da pessoa.
 - **Só computadores pareados** são atendidos, mesmo com o servidor na internet.
 - **Drivers à parte**: cada servidor instala só os drivers dos tokens que tem.
   O primeiro é o do RemoteID, pelo

@@ -1,6 +1,6 @@
 //! O servidor com o driver RemoteID, o `remoteid servir` e o servidor falso do
-//! RemoteID-linux: cada tipo de assinatura de ponta a ponta, conferida contra a
-//! chave pública do certificado que o token expõe.
+//! RemoteID-linux: cada tipo de assinatura de ponta a ponta, depois do PIN
+//! pessoal, conferida contra a chave pública do certificado que o token expõe.
 //!
 //! Precisa de `REMOTEID_BIN` e `REMOTEID_MOCK_BIN`: `eval "$(scripts/remoteid.sh)"`.
 
@@ -11,13 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use protocolo::{Chave, Fator, Mecanismo, Segredo, TipoDeErro};
+use protocolo::{
+    Apresentacao, Chave, Configurado, Fator, Listagem, Mecanismo, Segredo, TipoDeErro,
+};
 use rsa::PublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePublicKey;
-use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave};
-use servidor::driver::{Conversa, Driver, Falha};
+use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave, travar};
+use servidor::driver::{Conversa, Driver, Falha, Responder};
 use servidor::fatores::{Motivo, Pessoa};
+use servidor::pin::{self, Autenticado};
 use servidor::token::{FalhaDoToken, GuardaNoBanco, Token};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -27,6 +30,7 @@ use x509_cert::der::{Decode, Encode};
 const EMAIL: &str = "teste@remoteid.local";
 const SENHA: &str = "teste-1234";
 const OTP: &str = "123456";
+const PIN_PESSOAL: &str = "pessoal-2468";
 const DOCUMENTO: &[u8] = b"procuracao de teste";
 
 fn binario(variavel: &str) -> PathBuf {
@@ -137,10 +141,29 @@ fn servidor(dir: &Path, mock: &Mock) -> (Token, Arc<Mutex<Banco>>, IdDoToken) {
     (token, banco, id)
 }
 
-fn configurado(dir: &Path, mock: &Mock) -> Token {
-    let (mut token, _, _) = servidor(dir, mock);
+/// A pessoa no dispositivo pareado, depois do PIN pessoal: criada na primeira
+/// vez, como o administrador faria.
+fn autenticado(banco: &Mutex<Banco>) -> Autenticado {
+    let dispositivo = {
+        let b = travar(banco);
+        match b.dispositivos().unwrap().first() {
+            Some(registro) => registro.id,
+            None => {
+                let hash = pin::hash(&Segredo::novo(PIN_PESSOAL.into())).unwrap();
+                let maria = b.criar_usuario("maria", &hash).unwrap();
+                b.criar_dispositivo(maria, "notebook", b"chave do notebook")
+                    .unwrap()
+            }
+        }
+    };
+    pin::conferir(banco, dispositivo, &Segredo::novo(PIN_PESSOAL.into()))
+        .expect("o PIN pessoal confere")
+}
+
+fn configurado(dir: &Path, mock: &Mock) -> (Token, Autenticado) {
+    let (mut token, banco, _) = servidor(dir, mock);
     token.configurar(valores(EMAIL, SENHA)).expect("configura");
-    token
+    (token, autenticado(&banco))
 }
 
 /// Quem pediu a assinatura: responde os códigos na ordem e anota as perguntas.
@@ -210,7 +233,7 @@ const PREFIXO_SHA512: [u8; 19] = [
 fn configura_e_expoe_o_certificado_com_os_mecanismos_do_remoteid() {
     let mock = Mock::subir();
     let dir = diretorio("lista");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, _) = configurado(&dir, &mock);
 
     let apresentacao = token.driver().apresentacao().clone();
     assert_eq!(apresentacao.driver, "remoteid");
@@ -236,7 +259,7 @@ fn configura_e_expoe_o_certificado_com_os_mecanismos_do_remoteid() {
 fn cada_tipo_de_assinatura_confere_com_o_certificado() {
     let mock = Mock::subir();
     let dir = diretorio("tipos");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     let publica = chave_publica(&chave);
     let mut pessoa = Digita::codigos(&[OTP]);
@@ -261,7 +284,7 @@ fn cada_tipo_de_assinatura_confere_com_o_certificado() {
     ];
     for (mecanismo, esquema, resumo) in casos {
         let assinatura = token
-            .assinar(&chave.id, mecanismo, DOCUMENTO, &mut pessoa)
+            .assinar(&quem, &chave.id, mecanismo, DOCUMENTO, &mut pessoa)
             .unwrap_or_else(|e| panic!("{mecanismo:?}: {e}"));
         publica
             .verify(esquema, &resumo, &assinatura)
@@ -279,7 +302,7 @@ fn cada_tipo_de_assinatura_confere_com_o_certificado() {
     ];
     for bloco in blocos {
         let assinatura = token
-            .assinar(&chave.id, Mecanismo::RsaPkcs, &bloco, &mut pessoa)
+            .assinar(&quem, &chave.id, Mecanismo::RsaPkcs, &bloco, &mut pessoa)
             .unwrap_or_else(|e| panic!("bloco de {} bytes: {e}", bloco.len()));
         publica
             .verify(Pkcs1v15Sign::new_unprefixed(), &bloco, &assinatura)
@@ -295,12 +318,18 @@ fn cada_tipo_de_assinatura_confere_com_o_certificado() {
 fn otp_errado_volta_a_pessoa_com_a_recusa() {
     let mock = Mock::subir();
     let dir = diretorio("otp-errado");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     let mut pessoa = Digita::codigos(&["999999", OTP]);
 
     token
-        .assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa)
+        .assinar(
+            &quem,
+            &chave.id,
+            Mecanismo::Sha256RsaPkcs,
+            DOCUMENTO,
+            &mut pessoa,
+        )
         .expect("o segundo código assina");
     assert_eq!(pessoa.perguntas.len(), 2);
     assert_eq!(pessoa.perguntas[0].1, None);
@@ -314,11 +343,17 @@ fn otp_errado_volta_a_pessoa_com_a_recusa() {
 fn pessoa_que_desiste_cancela_a_assinatura() {
     let mock = Mock::subir();
     let dir = diretorio("desiste");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     let mut pessoa = Digita::codigos(&[]);
 
-    let falha = token.assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa);
+    let falha = token.assinar(
+        &quem,
+        &chave.id,
+        Mecanismo::Sha256RsaPkcs,
+        DOCUMENTO,
+        &mut pessoa,
+    );
     assert!(
         matches!(falha, Err(FalhaDoToken::Cancelado(Motivo::PessoaDesistiu))),
         "{falha:?}"
@@ -327,7 +362,13 @@ fn pessoa_que_desiste_cancela_a_assinatura() {
     // O token continua servindo depois da desistência.
     let mut pessoa = Digita::codigos(&[OTP]);
     token
-        .assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa)
+        .assinar(
+            &quem,
+            &chave.id,
+            Mecanismo::Sha256RsaPkcs,
+            DOCUMENTO,
+            &mut pessoa,
+        )
         .expect("assina depois");
 }
 
@@ -335,16 +376,28 @@ fn pessoa_que_desiste_cancela_a_assinatura() {
 fn sessao_vencida_pede_o_codigo_de_novo() {
     let mock = Mock::subir();
     let dir = diretorio("sessao");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     let mut pessoa = Digita::codigos(&[OTP, OTP]);
 
     token
-        .assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa)
+        .assinar(
+            &quem,
+            &chave.id,
+            Mecanismo::Sha256RsaPkcs,
+            DOCUMENTO,
+            &mut pessoa,
+        )
         .unwrap();
     mock.expirar_sessoes();
     token
-        .assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa)
+        .assinar(
+            &quem,
+            &chave.id,
+            Mecanismo::Sha256RsaPkcs,
+            DOCUMENTO,
+            &mut pessoa,
+        )
         .unwrap();
     assert_eq!(pessoa.perguntas.len(), 2);
 }
@@ -353,11 +406,17 @@ fn sessao_vencida_pede_o_codigo_de_novo() {
 fn mecanismo_sem_suporte_nao_gasta_o_codigo() {
     let mock = Mock::subir();
     let dir = diretorio("pss");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     let mut pessoa = Digita::codigos(&[OTP]);
 
-    let falha = token.assinar(&chave.id, Mecanismo::RsaPkcsPss, &[0; 32], &mut pessoa);
+    let falha = token.assinar(
+        &quem,
+        &chave.id,
+        Mecanismo::RsaPkcsPss,
+        &[0; 32],
+        &mut pessoa,
+    );
     assert!(
         matches!(
             &falha,
@@ -404,10 +463,11 @@ fn sem_configurar_nao_ha_chaves() {
 fn nenhum_segredo_em_claro_no_disco_nem_no_log() {
     let mock = Mock::subir();
     let dir = diretorio("segredos");
-    let mut token = configurado(&dir, &mock);
+    let (mut token, quem) = configurado(&dir, &mock);
     let chave = token.listar().unwrap().remove(0);
     token
         .assinar(
+            &quem,
             &chave.id,
             Mecanismo::Sha256RsaPkcs,
             DOCUMENTO,
@@ -434,7 +494,7 @@ fn nenhum_segredo_em_claro_no_disco_nem_no_log() {
     let cofre = banco.lock().unwrap().cofre(id).unwrap();
     let pin = cofre["pin"].expor();
     assert_eq!(pin.len(), 6);
-    for segredo in [SENHA, OTP, pin, "procuracao de teste"] {
+    for segredo in [SENHA, OTP, PIN_PESSOAL, pin, "procuracao de teste"] {
         assert!(!tudo.contains(segredo), "{segredo} em claro no disco");
     }
 }
@@ -443,11 +503,13 @@ fn nenhum_segredo_em_claro_no_disco_nem_no_log() {
 fn o_token_configurado_sobrevive_ao_reinicio_do_servidor() {
     let mock = Mock::subir();
     let dir = diretorio("reinicio");
-    let chave = configurado(&dir, &mock).listar().unwrap().remove(0);
+    let chave = configurado(&dir, &mock).0.listar().unwrap().remove(0);
 
     // Outro servidor, com o mesmo banco: assina sem ninguém configurar de novo.
-    let (mut token, _, _) = servidor(&dir, &mock);
+    let (mut token, banco, _) = servidor(&dir, &mock);
+    let quem = autenticado(&banco);
     let assinatura = token.assinar(
+        &quem,
         &chave.id,
         Mecanismo::Sha256RsaPkcs,
         DOCUMENTO,
@@ -460,16 +522,23 @@ fn o_token_configurado_sobrevive_ao_reinicio_do_servidor() {
 fn token_parado_continua_parado_depois_do_reinicio() {
     let mock = Mock::subir();
     let dir = diretorio("parado");
-    let chave = configurado(&dir, &mock).listar().unwrap().remove(0);
+    let chave = configurado(&dir, &mock).0.listar().unwrap().remove(0);
     {
         // O PIN guardado deixa de valer (alguém o trocou por fora).
         let (_, banco, id) = servidor(&dir, &mock);
         let errado = BTreeMap::from([("pin".to_string(), Segredo::novo("000000".into()))]);
         banco.lock().unwrap().configurado(id, &errado).unwrap();
     }
-    let (mut token, _, _) = servidor(&dir, &mock);
+    let (mut token, banco, _) = servidor(&dir, &mock);
+    let quem = autenticado(&banco);
     let mut pessoa = Digita::codigos(&[OTP]);
-    let falha = token.assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa);
+    let falha = token.assinar(
+        &quem,
+        &chave.id,
+        Mecanismo::Sha256RsaPkcs,
+        DOCUMENTO,
+        &mut pessoa,
+    );
     assert!(
         matches!(falha, Err(FalhaDoToken::Desatualizado(_))),
         "{falha:?}"
@@ -479,12 +548,91 @@ fn token_parado_continua_parado_depois_do_reinicio() {
     drop(token);
 
     // Reiniciado, o token recusa sem falar com o RemoteID nem perguntar nada.
-    let (mut token, _, _) = servidor(&dir, &mock);
+    let (mut token, banco, _) = servidor(&dir, &mock);
+    let quem = autenticado(&banco);
     let mut pessoa = Digita::codigos(&[OTP]);
-    let falha = token.assinar(&chave.id, Mecanismo::Sha256RsaPkcs, DOCUMENTO, &mut pessoa);
+    let falha = token.assinar(
+        &quem,
+        &chave.id,
+        Mecanismo::Sha256RsaPkcs,
+        DOCUMENTO,
+        &mut pessoa,
+    );
     assert!(
         matches!(falha, Err(FalhaDoToken::Desatualizado(_))),
         "{falha:?}"
     );
     assert!(pessoa.perguntas.is_empty());
+}
+
+/// O driver com tudo o que o servidor manda para ele anotado.
+struct Gravando {
+    driver: Driver,
+    enviados: Vec<String>,
+}
+
+impl Conversa for Gravando {
+    fn apresentacao(&self) -> &Apresentacao {
+        self.driver.apresentacao()
+    }
+
+    fn configurar(&mut self, valores: BTreeMap<String, Segredo>) -> Result<Configurado, Falha> {
+        let valores_enviados = valores.values().map(|v| v.expor().to_string());
+        self.enviados.extend(valores_enviados);
+        self.driver.configurar(valores)
+    }
+
+    fn listar(&mut self) -> Result<Listagem, Falha> {
+        self.driver.listar()
+    }
+
+    fn assinar(
+        &mut self,
+        chave: &str,
+        mecanismo: Mecanismo,
+        dados: &[u8],
+        fatores: &mut Responder<'_>,
+    ) -> Result<Vec<u8>, Falha> {
+        let enviados = &mut self.enviados;
+        self.driver.assinar(chave, mecanismo, dados, &mut |pedido| {
+            let resposta = fatores(pedido)?;
+            enviados.extend(resposta.values().map(|v| v.expor().to_string()));
+            Some(resposta)
+        })
+    }
+}
+
+#[test]
+fn o_pin_pessoal_nunca_chega_ao_driver() {
+    let mock = Mock::subir();
+    let dir = diretorio("pin-pessoal");
+    let (_, banco, id) = servidor(&dir, &mock);
+    let gravando = Gravando {
+        driver: lancar(&dir, &mock),
+        enviados: Vec::new(),
+    };
+    let mut token = Token::abrir(gravando, GuardaNoBanco::novo(banco.clone(), id)).unwrap();
+    token.configurar(valores(EMAIL, SENHA)).unwrap();
+    let quem = autenticado(&banco);
+    let chave = token.listar().unwrap().remove(0);
+    token
+        .assinar(
+            &quem,
+            &chave.id,
+            Mecanismo::Sha256RsaPkcs,
+            DOCUMENTO,
+            &mut Digita::codigos(&[OTP]),
+        )
+        .unwrap();
+
+    let enviados = &token.driver().enviados;
+    let guardado = travar(&banco).cofre(id).unwrap()["pin"].expor().to_string();
+    assert!(
+        enviados.contains(&guardado) && enviados.iter().any(|v| v == OTP),
+        "o PIN do token e o OTP foram ao driver"
+    );
+    assert!(
+        enviados.iter().all(|v| !v.contains(PIN_PESSOAL)),
+        "o PIN pessoal foi ao driver"
+    );
 }

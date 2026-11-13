@@ -7,11 +7,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::{Mutex, MutexGuard};
 
 use memoria::Travado;
 use protocolo::Segredo;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -41,7 +43,8 @@ const PRAGMAS: &str = "
 
 /// O esquema, uma migração por versão (`PRAGMA user_version`). Uma migração
 /// entra no fim e nunca muda depois de publicada.
-const MIGRACOES: &[&str] = &["
+const MIGRACOES: &[&str] = &[
+    "
     CREATE TABLE token (
         id INTEGER PRIMARY KEY,
         nome TEXT NOT NULL UNIQUE,
@@ -55,7 +58,22 @@ const MIGRACOES: &[&str] = &["
         valor TEXT NOT NULL,
         PRIMARY KEY (token, nome)
     ) STRICT;
-"];
+",
+    "
+    CREATE TABLE usuario (
+        id INTEGER PRIMARY KEY,
+        nome TEXT NOT NULL UNIQUE,
+        pin TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE dispositivo (
+        id INTEGER PRIMARY KEY,
+        usuario INTEGER NOT NULL REFERENCES usuario (id),
+        nome TEXT NOT NULL,
+        chave_publica BLOB NOT NULL UNIQUE,
+        erros_seguidos INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+",
+];
 
 #[derive(Debug)]
 pub enum FalhaDoBanco {
@@ -119,6 +137,67 @@ pub struct RegistroDoToken {
     /// O executável do driver, em `/drivers`.
     pub driver: String,
     pub argumentos: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdDoUsuario(pub(crate) i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdDoDispositivo(pub(crate) i64);
+
+/// Como a CLI mostra e lê o dispositivo.
+impl fmt::Display for IdDoDispositivo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for IdDoDispositivo {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(texto: &str) -> Result<IdDoDispositivo, Self::Err> {
+        texto.parse().map(IdDoDispositivo)
+    }
+}
+
+/// O PIN pessoal em Argon2id, no formato PHC. Só [`crate::pin`] cria um a
+/// partir de um PIN, então o banco nunca recebe o PIN em si.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashDoPin(pub(crate) String);
+
+impl HashDoPin {
+    pub fn como_texto(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistroDoDispositivo {
+    pub id: IdDoDispositivo,
+    pub usuario: String,
+    pub nome: String,
+    pub erros_seguidos: u32,
+}
+
+/// Uma tentativa de PIN pessoal, já contada.
+#[derive(Debug)]
+pub enum Reserva {
+    Desconhecido,
+    /// O dispositivo já chegou ao limite de erros: nada foi contado.
+    Bloqueado,
+    /// Contada como erro até o PIN conferir.
+    Contada {
+        usuario: IdDoUsuario,
+        pin: HashDoPin,
+        erros_seguidos: u32,
+    },
+}
+
+/// O banco de uma conexão compartilhada. Um pânico com o banco na mão não
+/// deixa transação aberta (o SQLite desfaz a que não terminou), então o banco
+/// continua usável.
+pub fn travar(banco: &Mutex<Banco>) -> MutexGuard<'_, Banco> {
+    banco.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct Banco {
@@ -272,6 +351,110 @@ impl Banco {
             params![token.0, nomes],
         )?;
         Ok(())
+    }
+
+    pub fn criar_usuario(&self, nome: &str, pin: &HashDoPin) -> Result<IdDoUsuario, FalhaDoBanco> {
+        self.conexao.execute(
+            "INSERT INTO usuario (nome, pin) VALUES (?1, ?2)",
+            params![nome, pin.0],
+        )?;
+        Ok(IdDoUsuario(self.conexao.last_insert_rowid()))
+    }
+
+    pub fn usuario(&self, nome: &str) -> Result<Option<IdDoUsuario>, FalhaDoBanco> {
+        Ok(self
+            .conexao
+            .query_row("SELECT id FROM usuario WHERE nome = ?1", [nome], |l| {
+                l.get(0).map(IdDoUsuario)
+            })
+            .optional()?)
+    }
+
+    pub fn trocar_pin(&self, usuario: IdDoUsuario, pin: &HashDoPin) -> Result<(), FalhaDoBanco> {
+        self.conexao.execute(
+            "UPDATE usuario SET pin = ?2 WHERE id = ?1",
+            params![usuario.0, pin.0],
+        )?;
+        Ok(())
+    }
+
+    /// `chave_publica` é a chave que o dispositivo usa no mTLS.
+    pub fn criar_dispositivo(
+        &self,
+        usuario: IdDoUsuario,
+        nome: &str,
+        chave_publica: &[u8],
+    ) -> Result<IdDoDispositivo, FalhaDoBanco> {
+        self.conexao.execute(
+            "INSERT INTO dispositivo (usuario, nome, chave_publica) VALUES (?1, ?2, ?3)",
+            params![usuario.0, nome, chave_publica],
+        )?;
+        Ok(IdDoDispositivo(self.conexao.last_insert_rowid()))
+    }
+
+    pub fn dispositivos(&self) -> Result<Vec<RegistroDoDispositivo>, FalhaDoBanco> {
+        let mut consulta = self.conexao.prepare(
+            "SELECT d.id, u.nome, d.nome, d.erros_seguidos
+             FROM dispositivo d JOIN usuario u ON u.id = d.usuario
+             ORDER BY u.nome, d.nome",
+        )?;
+        let linhas = consulta.query_map([], |l| {
+            Ok(RegistroDoDispositivo {
+                id: IdDoDispositivo(l.get(0)?),
+                usuario: l.get(1)?,
+                nome: l.get(2)?,
+                erros_seguidos: l.get(3)?,
+            })
+        })?;
+        Ok(linhas.collect::<Result<_, _>>()?)
+    }
+
+    /// Conta a tentativa como erro antes de o PIN ser conferido, a não ser que
+    /// o dispositivo já esteja em `limite`. Assim tentativas em paralelo não
+    /// passam do limite, e uma queda no meio da conferência conta como erro.
+    pub fn reservar_tentativa(
+        &self,
+        dispositivo: IdDoDispositivo,
+        limite: u32,
+    ) -> Result<Reserva, FalhaDoBanco> {
+        // IMMEDIATE: outra conexão (a CLI) não lê o contador entre a leitura e
+        // a escrita desta.
+        let transacao = Transaction::new_unchecked(&self.conexao, TransactionBehavior::Immediate)?;
+        let atual: Option<(i64, u32, String)> = transacao
+            .query_row(
+                "SELECT d.usuario, d.erros_seguidos, u.pin
+                 FROM dispositivo d JOIN usuario u ON u.id = d.usuario
+                 WHERE d.id = ?1",
+                [dispositivo.0],
+                |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
+            )
+            .optional()?;
+        let Some((usuario, erros_seguidos, pin)) = atual else {
+            return Ok(Reserva::Desconhecido);
+        };
+        if erros_seguidos >= limite {
+            return Ok(Reserva::Bloqueado);
+        }
+        transacao.execute(
+            "UPDATE dispositivo SET erros_seguidos = erros_seguidos + 1 WHERE id = ?1",
+            [dispositivo.0],
+        )?;
+        transacao.commit()?;
+        Ok(Reserva::Contada {
+            usuario: IdDoUsuario(usuario),
+            pin: HashDoPin(pin),
+            erros_seguidos: erros_seguidos + 1,
+        })
+    }
+
+    /// Zera os erros seguidos: o PIN conferiu, ou o administrador desbloqueou.
+    /// `false` se o dispositivo não existe.
+    pub fn zerar_erros(&self, dispositivo: IdDoDispositivo) -> Result<bool, FalhaDoBanco> {
+        let mudou = self.conexao.execute(
+            "UPDATE dispositivo SET erros_seguidos = 0 WHERE id = ?1",
+            [dispositivo.0],
+        )?;
+        Ok(mudou == 1)
     }
 
     /// Copia o banco para `destino`, que não pode existir, com o serviço
