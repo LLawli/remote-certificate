@@ -126,8 +126,22 @@ um programa do host assinou pelo servidor do driver que o Tessera publica em
 
 ### PJeOffice e Assinador Serpro
 
-Os dois carregam o módulo pelo Java (SunPKCS11), com o caminho configurado
-neles. Use `/home/<usuario>/.local/lib/remote-certificate/libremote_certificate_pkcs11.so`,
+Instalados pelo FlatPark (`br.jus.cnj.PJeOfficePro`,
+`br.gov.serpro.desktop.assinador`), os dois chegam aos tokens pelo servidor do
+p11-kit do usuário, que exporta o módulo já registrado pelo `instalar.sh`. Basta
+ligar o servidor uma vez:
+
+```sh
+systemctl --user enable --now p11-kit-server.socket
+```
+
+Medido no Fedora 44: o Assinador Serpro achou o token e entrou com o PIN
+pessoal. A assinatura em si não foi conferida nos dois, porque o Serpro só
+assina com um certificado de cadeia ICP-Brasil, que o servidor falso de testes
+não tem.
+
+Instalados de outro jeito, os dois carregam o módulo pelo Java (SunPKCS11), com
+o caminho configurado neles. Use `/home/<usuario>/.local/lib/remote-certificate/libremote_certificate_pkcs11.so`,
 ou o `p11-kit-proxy.so` do sistema onde o NSS lê o p11-kit. O SunPKCS11 assinou
 e cifrou com a chave privada (o caminho do PJeOffice) no Fedora 44, direto e
 pelo proxy.
