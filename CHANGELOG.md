@@ -58,6 +58,10 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   nem deixam core dump; o container roda só leitura e sem capabilities.
 - Uma linha do contrato de driver tem no máximo 1 MiB.
 - Imagem de container do servidor.
+- `remote-certificate-agente`, o agente da estação: `parear`, `estado`,
+  `esquecer` e `servir`. Guarda a chave do dispositivo num arquivo só do
+  usuário, atende as faces por um socket Unix e pergunta o OTP numa janela à
+  parte. Cada aplicação tem o seu login do PIN pessoal.
 - API HTTP `/v1` para sistemas integrados: `GET /v1/chaves` e a assinatura
   como recurso em `/v1/assinaturas`, com um lote de até 1000 documentos por
   PIN pessoal, o pedido do OTP no meio, a desistência e a consulta que espera

@@ -1,0 +1,18 @@
+[package]
+name = "ipc"
+description = "A conversa entre a face (o módulo PKCS#11) e o agente da estação"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Leve de propósito: a face roda dentro do processo do navegador ou do
+# assinador, e não leva tokio, TLS nem HTTP.
+[dependencies]
+protocolo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

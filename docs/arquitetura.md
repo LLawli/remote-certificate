@@ -104,6 +104,25 @@ duas camadas:
   - O IPC entre face e agente fica atrás de um trait: socket Unix no Linux e no
     macOS, named pipe no Windows.
 
+O agente é `crates/agente` (binário `remote-certificate-agente`):
+
+- `parear <ip:porta>` gera a chave P-256 do dispositivo, pareia com o código
+  que vem do stdin e grava o cofre; `estado` e `esquecer` mostram e apagam o
+  pareamento; `servir` atende as faces.
+- A face fala com o agente pelo crate `ipc`, leve de propósito porque roda
+  dentro do processo do navegador: JSON, uma mensagem por linha (`listar`,
+  `entrar` com o PIN do `C_Login`, `sair`, `assinar`). No Linux, um socket
+  Unix em `$XDG_RUNTIME_DIR/remote-certificate/agente.sock`.
+- Cada face conectada ganha a sua conexão com o servidor, aberta no primeiro
+  pedido: o login do PIN pessoal é daquela aplicação, e duas aplicações
+  assinam ao mesmo tempo. Se a conexão cai, a próxima volta sem o login, e a
+  face vê `nao_autenticado`.
+- Quando o servidor pede o OTP, o agente chama a janela
+  (`remote-certificate-dialogo`, ao lado do agente, ou
+  `REMOTE_CERTIFICATE_DIALOGO`) com a pergunta no stdin e lê os valores no
+  stdout. Fechar a janela, ou 3 minutos sem resposta, é desistir. A face só
+  recebe o fim.
+
 O agente fala com o servidor por um WebSocket em `/v1/agente`, sobre o mTLS
 do dispositivo, com uma mensagem JSON por quadro (`rede::agente`):
 

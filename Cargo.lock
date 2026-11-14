@@ -9,6 +9,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agente"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "memoria",
+ "protocolo",
+ "rede",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -402,8 +417,10 @@ dependencies = [
 name = "driver-remoteid"
 version = "0.1.0"
 dependencies = [
+ "agente",
  "base64 0.22.1",
  "getrandom 0.3.4",
+ "ipc",
  "memoria",
  "protocolo",
  "rede",
@@ -667,6 +684,15 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tower-service",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "protocolo",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

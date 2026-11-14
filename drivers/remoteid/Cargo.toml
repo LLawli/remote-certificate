@@ -20,6 +20,8 @@ serde_json.workspace = true
 sha2 = "0.11"
 
 [dev-dependencies]
+agente.workspace = true
+ipc.workspace = true
 rede = { path = "../../crates/rede" }
 servidor = { path = "../../crates/servidor" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

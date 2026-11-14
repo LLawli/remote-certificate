@@ -152,15 +152,25 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
 
 ## Estação
 
-- **Chave do dispositivo**: no Linux, selada no TPM com `systemd-creds --user`
-  quando o systemd tem isso (256 ou mais) e há TPM; copiar os arquivos do
-  agente para outra máquina não leva o dispositivo junto. Sem TPM, arquivo
-  `0600`. Windows e macOS usam o cofre deles (CNG/TPM, Secure Enclave). A medir
-  na VM: em quais distribuições o `--user` existe.
-- Em memória, como a chave do banco: `mlock`, `MADV_DONTDUMP`, `zeroize`; o
-  agente com `PR_SET_DUMPABLE 0` e `RLIMIT_CORE 0`.
-- O socket entre face e agente fica em `$XDG_RUNTIME_DIR`, modo `0600`, e o
-  agente confere o usuário do outro lado (`SO_PEERCRED`).
+- **Chave do dispositivo**: no Linux (v1), um arquivo `0600` num diretório
+  `0700` (`$XDG_DATA_HOME/remote-certificate/dispositivo.json`), como uma
+  chave SSH. O agente recusa um cofre que outro usuário consegue ler. Sozinha,
+  a chave só lista os certificados e gasta as tentativas do PIN pessoal, que
+  bloqueiam o dispositivo. O TPM (`systemd-creds --user`, CNG no Windows,
+  Secure Enclave no macOS) entra atrás do mesmo trait (`agente::cofre`).
+- O agente roda com `PR_SET_DUMPABLE 0` e `RLIMIT_CORE 0`. A chave do
+  dispositivo fica num buffer que é zerado ao sair, mas o rustls guarda a
+  cópia dele, que não é travada na RAM.
+- O socket entre face e agente fica em
+  `$XDG_RUNTIME_DIR/remote-certificate/agente.sock`, num diretório `0700`, e o
+  agente confere o usuário do outro lado (`SO_PEERCRED`). Uma mensagem tem no
+  máximo 6 MiB; passou disso, a conexão cai.
+- A janela do OTP é um programa à parte (`remote-certificate-dialogo`): a
+  pergunta vai pelo stdin e o código volta pelo stdout, nunca por argumento
+  nem por ambiente. Sem resposta em 3 minutos, o agente fecha a janela e
+  desiste.
+- Cada aplicação tem a sua conexão com o servidor e o seu login, como o
+  `C_Login` do PKCS#11: o PIN que o Firefox mandou não assina pelo PJeOffice.
 - **Sessão que expira**: depois de um tempo sem uso, o servidor esquece o login
   do PIN pessoal e a próxima operação pede o PIN de novo. A medir na VM: como
   Firefox, PJeOffice e Serpro reagem a `CKR_USER_NOT_LOGGED_IN` no meio do uso.
@@ -187,9 +197,11 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
   o secret enquanto ele roda.
 - **Quem controla o host ligado** abre a chave do TPM como o serviço abre. O
   TPM protege o disco copiado ou roubado, não o host invadido.
-- **O `remoteid servir`** guarda a senha e o PIN da conta na memória dele e não
-  se marca como não depurável (o `execve` desfaz o que o driver marcou). Fica
-  para o RemoteID-linux aplicar o mesmo `PR_SET_DUMPABLE`.
+- **O `remoteid servir` anterior ao 0.5.2** guarda a senha e o PIN da conta
+  na memória dele e não se marca como não depurável (o `execve` desfaz o que o
+  driver marcou). O 0.5.2 se marca sozinho; o driver aceita o 0.5.1 porque não
+  tem como distinguir os dois pelo protocolo, e a imagem do driver leva o
+  0.5.2.
 - **SSD e Btrfs** guardam blocos antigos: o que um dia foi gravado em claro
   pode sobreviver no disco. Por isso nada é gravado em claro, nem uma vez.
 - **Captura de tela**: na estação, um programa do mesmo usuário pode capturar a

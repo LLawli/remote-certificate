@@ -1053,3 +1053,185 @@ fn o_sistema_assina_um_lote_pela_api_com_o_pin_e_o_otp() {
         servidor::auditoria::Verificacao::Integra { .. }
     ));
 }
+
+/// A janela do OTP no teste: responde os códigos na ordem e guarda as
+/// perguntas. Sem código, fecha a janela.
+#[derive(Default)]
+struct JanelaDeTeste {
+    codigos: Mutex<VecDeque<&'static str>>,
+    perguntas: Mutex<Vec<agente::dialogo::Pergunta>>,
+}
+
+impl agente::dialogo::Dialogo for JanelaDeTeste {
+    fn perguntar(&self, pergunta: &agente::dialogo::Pergunta) -> Option<BTreeMap<String, Segredo>> {
+        self.perguntas.lock().unwrap().push(pergunta.clone());
+        let codigo = self.codigos.lock().unwrap().pop_front()?;
+        Some(otp_da_api(codigo))
+    }
+}
+
+/// A face (o módulo PKCS#11) conectada ao agente, assim que ele atende.
+fn face(socket: &Path) -> ipc::Cliente {
+    for _ in 0..100 {
+        if let Ok(cliente) = ipc::Cliente::conectar_em(socket) {
+            return cliente;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("o agente não atendeu em {}", socket.display());
+}
+
+fn tipo_na_face(resposta: &ipc::DoAgente) -> Option<ipc::TipoDeFalha> {
+    match resposta {
+        ipc::DoAgente::Falha { erro } => Some(erro.tipo),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_estacao_assina_pelo_agente_com_o_pin_pessoal_e_a_janela_do_otp() {
+    use agente::cofre::{Cofre, CofreEmArquivo};
+
+    let mock = Mock::subir();
+    let dir = diretorio("estacao");
+    let banco = banco(&dir);
+    token_no_banco(&dir, &mock, &banco);
+    let hash = pin::hash(&Segredo::novo(PIN_PESSOAL.into())).unwrap();
+    let maria = travar(&banco).criar_usuario("maria", &hash).unwrap();
+
+    let execucao = tokio::runtime::Runtime::new().unwrap();
+    let endereco = execucao.block_on(async {
+        let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endereco = ouvinte.local_addr().unwrap().to_string();
+        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        tokio::spawn(servico::servir(ouvinte, estado));
+        endereco
+    });
+
+    // O pareamento passa pelo cofre, como o `remote-certificate-agente parear`.
+    let codigo = servico::novo_pareamento(&banco, maria, "notebook").unwrap();
+    let cofre = CofreEmArquivo::em(dir.join("cofre"));
+    cofre
+        .gravar(
+            &execucao
+                .block_on(agente::novo_pareamento(&endereco, &codigo))
+                .unwrap(),
+        )
+        .unwrap();
+    let janela = Arc::new(JanelaDeTeste::default());
+    let socket = dir.join("execucao").join("agente.sock");
+    let agente = agente::Agente::novo(cofre.ler().unwrap().unwrap(), janela.clone());
+    let ouvir = socket.clone();
+    execucao.spawn(async move { agente::unix::ouvir(agente, &ouvir).await });
+
+    let mut firefox = face(&socket);
+    let ipc::DoAgente::Chaves { chaves } = firefox.pedir(&ipc::DaFace::Listar {}).unwrap() else {
+        panic!("esperava as chaves");
+    };
+    assert_eq!(chaves.len(), 1);
+    assert_eq!(chaves[0].token, "RemoteID");
+    let publica = chave_publica(&chaves[0].chave);
+    let assinar = || ipc::DaFace::Assinar {
+        token: "RemoteID".into(),
+        chave: chaves[0].chave.id.clone(),
+        mecanismo: Mecanismo::Sha256RsaPkcs,
+        dados: DOCUMENTO.to_vec(),
+    };
+    let entrar = |pin: &str| ipc::DaFace::Entrar {
+        pin: Segredo::novo(pin.into()),
+    };
+
+    // Sem o C_Login, não assina; o PIN errado conta.
+    let resposta = firefox.pedir(&assinar()).unwrap();
+    assert_eq!(
+        tipo_na_face(&resposta),
+        Some(ipc::TipoDeFalha::NaoAutenticado)
+    );
+    let resposta = firefox.pedir(&entrar("0000")).unwrap();
+    assert!(
+        matches!(&resposta, ipc::DoAgente::Falha { erro }
+            if erro.tipo == ipc::TipoDeFalha::PinErrado && erro.restantes == Some(2)),
+        "{resposta:?}"
+    );
+    assert_eq!(
+        firefox.pedir(&entrar(PIN_PESSOAL)).unwrap(),
+        ipc::DoAgente::Entrou {}
+    );
+
+    // A janela pergunta o OTP; o código errado volta para ela com a recusa.
+    janela.codigos.lock().unwrap().extend(["999999", OTP]);
+    let ipc::DoAgente::Assinatura { assinatura } = firefox.pedir(&assinar()).unwrap() else {
+        panic!("esperava a assinatura");
+    };
+    publica
+        .verify(
+            Pkcs1v15Sign::new::<Sha256>(),
+            &Sha256::digest(DOCUMENTO),
+            &assinatura,
+        )
+        .expect("a assinatura confere com o certificado");
+    {
+        let perguntas = janela.perguntas.lock().unwrap();
+        assert_eq!(perguntas.len(), 2);
+        assert_eq!(perguntas[0].recusa, None);
+        assert!(perguntas[1].recusa.is_some());
+        assert_eq!(
+            perguntas[0].certificado.as_deref(),
+            Some(chaves[0].chave.rotulo.as_str()),
+            "a janela diz com qual certificado vai assinar"
+        );
+        assert_eq!(
+            perguntas[0]
+                .fatores
+                .iter()
+                .map(|f| f.nome.as_str())
+                .collect::<Vec<_>>(),
+            ["otp"]
+        );
+    }
+
+    // O login é de cada aplicação, como o C_Login.
+    let mut pjeoffice = face(&socket);
+    let resposta = pjeoffice.pedir(&assinar()).unwrap();
+    assert_eq!(
+        tipo_na_face(&resposta),
+        Some(ipc::TipoDeFalha::NaoAutenticado)
+    );
+
+    // Fechar a janela cancela, e a aplicação segue logada.
+    mock.expirar_sessoes();
+    let resposta = firefox.pedir(&assinar()).unwrap();
+    assert_eq!(tipo_na_face(&resposta), Some(ipc::TipoDeFalha::Cancelado));
+    assert_eq!(janela.perguntas.lock().unwrap().len(), 3);
+
+    // O C_Logout fecha o login dessa aplicação.
+    assert_eq!(
+        firefox.pedir(&ipc::DaFace::Sair {}).unwrap(),
+        ipc::DoAgente::Saiu {}
+    );
+    let resposta = firefox.pedir(&assinar()).unwrap();
+    assert_eq!(
+        tipo_na_face(&resposta),
+        Some(ipc::TipoDeFalha::NaoAutenticado)
+    );
+    drop(execucao);
+
+    let linhas = travar(&banco).auditoria(1000).unwrap();
+    let assinaturas: Vec<_> = linhas.iter().filter(|l| l.evento == "assinatura").collect();
+    assert_eq!(
+        assinaturas
+            .iter()
+            .map(|l| l.resultado.as_str())
+            .collect::<Vec<_>>(),
+        ["assinada", "cancelada"]
+    );
+    assert!(
+        assinaturas
+            .iter()
+            .all(|l| l.usuario.as_deref() == Some("maria"))
+    );
+    let tudo = format!("{linhas:?}");
+    for segredo in [PIN_PESSOAL, OTP, SENHA, "999999", "procuracao de teste"] {
+        assert!(!tudo.contains(segredo), "{segredo} na auditoria");
+    }
+}
