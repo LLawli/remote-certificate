@@ -14,6 +14,8 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   `remoteid servir`: assina com `CKM_RSA_PKCS` e `CKM_SHA256_RSA_PKCS`,
   `CKM_SHA384_RSA_PKCS` e `CKM_SHA512_RSA_PKCS`, pedindo o OTP a quem assina.
   Exige o `remoteid` 0.5.1 ou mais novo e avisa quando o instalado é anterior.
+  Testado com o 0.5.2, que fecha a memória do `remoteid` para outros
+  processos; é o recomendado.
 - O servidor responde os fatores guardados (PIN e senha) sem que ninguém os
   conheça, e para o token, sem nova tentativa, quando o token recusa um deles,
   mesmo que o token peça junto um fator da pessoa. O token parado continua

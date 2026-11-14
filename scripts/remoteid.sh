@@ -10,9 +10,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# A revisão do RemoteID-linux que este projeto testa (a release v0.5.1).
+# A revisão do RemoteID-linux que este projeto testa (a release v0.5.2).
 REPOSITORIO=https://github.com/LLawli/RemoteID-linux.git
-REVISAO=8e441b84e27b02090b188157d6fc5e8b2556f095
+REVISAO=bc8d2784f0d7956b5896a3d828be00d916b38c79
 
 dir=${REMOTEID_LINUX_DIR:-}
 if [[ -z $dir ]]; then
