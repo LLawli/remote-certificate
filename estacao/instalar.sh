@@ -35,6 +35,14 @@ sed "s|@BIN@|$bin|" remote-certificate-agente.service >"$unit"
 systemctl --user daemon-reload
 systemctl --user enable remote-certificate-agente.service
 
+# A janela do OTP é GTK 4 com libadwaita, que um desktop KDE não traz.
+if ldd "$bin/remote-certificate-dialogo" | grep -q 'not found'; then
+    echo "atenção: a janela do OTP precisa do GTK 4 e da libadwaita. Instale:"
+    echo "  Arch:          sudo pacman -S gtk4 libadwaita"
+    echo "  Debian/Ubuntu: sudo apt install libgtk-4-1 libadwaita-1-0"
+    echo "  Fedora:        sudo dnf install gtk4 libadwaita"
+fi
+
 if "$bin/remote-certificate-agente" estado | grep -q '^pareado'; then
     systemctl --user restart remote-certificate-agente.service
     echo "instalado e atualizado"

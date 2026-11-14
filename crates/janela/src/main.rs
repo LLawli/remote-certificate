@@ -68,6 +68,11 @@ fn e_codigo(nome: &str) -> bool {
 }
 
 fn montar(app: &adw::Application, pergunta: &Pergunta, respondido: Rc<Cell<bool>>) {
+    // Os ícones simbólicos da janela são os do Adwaita. No KDE, o GTK segue o
+    // Breeze, que não tem esses nomes, e a janela ficava com ícones quebrados.
+    if let Some(ajustes) = gtk::Settings::default() {
+        ajustes.set_gtk_icon_theme_name(Some("Adwaita"));
+    }
     let campos = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])

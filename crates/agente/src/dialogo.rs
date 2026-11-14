@@ -62,12 +62,24 @@ impl DialogoExterno {
 
 impl Dialogo for DialogoExterno {
     fn perguntar(&self, pergunta: &Pergunta) -> Option<BTreeMap<String, Segredo>> {
-        let mut filho = Command::new(&self.programa)
+        // O stderr da janela vai para o do agente (o journal, no serviço):
+        // é onde aparece a biblioteca que falta. A janela nunca escreve o
+        // código ali.
+        let mut filho = match Command::new(&self.programa)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
-            .ok()?;
+        {
+            Ok(filho) => filho,
+            Err(e) => {
+                eprintln!(
+                    "não deu para abrir a janela do OTP ({}): {e}",
+                    self.programa.display()
+                );
+                return None;
+            }
+        };
         let entrada = serde_json::to_vec(pergunta).ok()?;
         let escrito = filho
             .stdin
@@ -81,14 +93,25 @@ impl Dialogo for DialogoExterno {
             let _ = pronto.send(lido.map(|_| texto));
         });
         let texto = match resposta.recv_timeout(self.prazo) {
-            Ok(Ok(texto)) if escrito => zeroize::Zeroizing::new(texto),
+            Ok(Ok(texto)) => zeroize::Zeroizing::new(texto),
             _ => {
                 let _ = filho.kill();
                 let _ = filho.wait();
                 return None;
             }
         };
-        if !filho.wait().ok()?.success() {
+        let estado = filho.wait().ok()?;
+        // Sair com 1 é a pessoa fechando a janela; outro código é defeito.
+        if !estado.success() {
+            if estado.code() != Some(1) {
+                eprintln!(
+                    "a janela do OTP ({}) terminou com {estado}",
+                    self.programa.display()
+                );
+            }
+            return None;
+        }
+        if !escrito {
             return None;
         }
         serde_json::from_slice::<Valores>(&texto)

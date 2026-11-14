@@ -6,7 +6,9 @@ servidor e os compartilha pela rede, para escritórios (de advocacia, de
 contabilidade) que usam um único certificado em várias estações de trabalho e
 nos próprios sistemas internos.
 
-> **Em construção.** Nada disto funciona ainda. O desenho está em
+> **Em construção.** O servidor, a API e a estação Linux já funcionam com o
+> RemoteID, testados contra o servidor falso dele; falta a imagem do driver
+> para rodar em produção. O desenho está em
 > [docs/arquitetura.md](docs/arquitetura.md).
 
 ## O que ele vai fazer
@@ -24,6 +26,11 @@ nos próprios sistemas internos.
   [RemoteID-linux](https://github.com/LLawli/RemoteID-linux).
 
 As estações começam pelo Linux; Windows e macOS estão previstos no desenho.
+
+## Instalar uma estação
+
+Como parear um computador e pôr o token no navegador, no leitor de PDF e nos
+assinadores: [docs/estacao.md](docs/estacao.md).
 
 ## Desenvolvimento
 

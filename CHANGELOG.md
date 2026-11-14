@@ -74,6 +74,12 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   `instalar.sh` por usuário, sem root, que registra o módulo no p11-kit do
   usuário e sobe o agente como serviço do systemd do usuário. No Fedora 44,
   Firefox, Chromium e Papers usam o token só com isso.
+- `docs/estacao.md`: como pôr o token em cada programa, medido no Fedora 44,
+  no Ubuntu 24.04 (incluindo os navegadores em snap) e no Arch com KDE.
+- O `instalar.sh` avisa quando falta o GTK 4 ou a libadwaita da janela do
+  OTP, e o agente registra no journal quando não consegue abrir a janela.
+- A janela do OTP usa os ícones do Adwaita também no KDE, onde ficavam
+  quebrados.
 - O cliente (agente, pareamento e API) desiste de conectar depois de 10 s, em
   vez de esperar para sempre um servidor atrás de um firewall que descarta os
   pacotes.
