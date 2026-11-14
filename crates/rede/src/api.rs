@@ -228,7 +228,15 @@ impl Cliente {
         let pedido = pedido
             .body(Full::new(Bytes::from(corpo.unwrap_or_default())))
             .expect("pedido bem formado");
-        let resposta = match self.envio.send_request(pedido).await {
+        // A conexão é reaproveitada: o próximo pedido espera ela terminar o
+        // anterior. Sem isso o hyper descarta o pedido ("operation was
+        // canceled") quando a resposta anterior ainda está fechando.
+        let pronta = self.envio.ready().await;
+        let resposta = match pronta {
+            Ok(()) => self.envio.send_request(pedido).await,
+            Err(e) => Err(e),
+        };
+        let resposta = match resposta {
             Ok(resposta) => resposta,
             Err(e) => {
                 // A falha de verdade (o alerta do TLS) fica com a conversa.
