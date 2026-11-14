@@ -88,6 +88,42 @@ O snap não enxerga `~/.local` nem o socket do agente. Funciona com três passos
 
 Atualizar a estação não atualiza a cópia de dentro do snap: refaça o passo 1.
 
+### Pelo Tessera (apps em Flatpak)
+
+O [Tessera](https://github.com/pedrohqb/tessera) publica drivers de token para
+os apps em Flatpak. O módulo roda dentro do sandbox dele e procura o agente em
+`/run/user/<uid>/app/io.github.pedrohqb.Tessera/`, o único diretório de
+execução que o sandbox enxerga. Um segundo agente escuta ali:
+
+```sh
+cd ~/.config/systemd/user
+sed '/^\[Service\]/a Environment=REMOTE_CERTIFICATE_AGENTE=%t/app/io.github.pedrohqb.Tessera/remote-certificate/agente.sock' \
+    remote-certificate-agente.service > remote-certificate-agente-tessera.service
+systemctl --user daemon-reload
+systemctl --user enable --now remote-certificate-agente-tessera.service
+```
+
+Enquanto a extensão do Tessera não está no FlatPark, o driver entra por uma
+pasta (`TESSERA_DRIVERS_PATH`), com uma subpasta por driver:
+
+```sh
+mkdir -p ~/tessera-drivers/remote-certificate/lib
+cp ~/.local/lib/remote-certificate/libremote_certificate_pkcs11.so ~/tessera-drivers/remote-certificate/lib/
+cat > ~/tessera-drivers/remote-certificate/driver.toml <<'FIM'
+name = "remote-certificate"
+vendor = "remote-certificate"
+description = "Tokens do servidor remote-certificate"
+module = "lib/libremote_certificate_pkcs11.so"
+FIM
+flatpak override --user --filesystem=$HOME/tessera-drivers:ro io.github.pedrohqb.Tessera
+flatpak run --env=TESSERA_DRIVERS_PATH=$HOME/tessera-drivers io.github.pedrohqb.Tessera
+```
+
+Medido no Tessera 0.4.3 (Fedora 44): o `tessera probe-sign` assinou pelo
+módulo de dentro do sandbox, com a janela do OTP aberta pelo agente do host, e
+um programa do host assinou pelo servidor do driver que o Tessera publica em
+`/run/user/<uid>/tessera/remote-certificate` (conferido com o `openssl`).
+
 ### PJeOffice e Assinador Serpro
 
 Os dois carregam o módulo pelo Java (SunPKCS11), com o caminho configurado

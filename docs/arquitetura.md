@@ -149,6 +149,12 @@ do módulo PKCS#11 do RemoteID-linux:
   de rotina num anel em memória, que só vai ao disco junto de uma operação, um
   erro ou um `panic`. O PIN e os dados não entram.
 
+Dentro de um sandbox o `$XDG_RUNTIME_DIR` do host não aparece. Num Flatpak
+(o Tessera, que publica drivers para os apps em Flatpak), o módulo procura o
+agente em `$XDG_RUNTIME_DIR/app/$FLATPAK_ID`, e no snap, em
+`$XDG_RUNTIME_DIR/snap.<app>`, onde o próprio snap aponta o `XDG_RUNTIME_DIR`.
+O agente do host escuta ali por uma segunda unit (`docs/estacao.md`).
+
 A janela do OTP no Linux é `crates/janela` (`remote-certificate-dialogo`), GTK 4
 com libadwaita: um campo por fator pedido, a recusa num banner, e fechar ou
 Esc é desistir. Sem `application_id`, para abrir também dentro de um sandbox.

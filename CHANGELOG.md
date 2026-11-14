@@ -80,6 +80,12 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   OTP, e o agente registra no journal quando não consegue abrir a janela.
 - A janela do OTP usa os ícones do Adwaita também no KDE, onde ficavam
   quebrados.
+- O módulo, dentro de um Flatpak (o Tessera), procura o agente no diretório
+  de execução do app, `$XDG_RUNTIME_DIR/app/$FLATPAK_ID`. Testado no Tessera
+  0.4.3.
+- Um mecanismo que o token não tem (o RSA-PSS do TLS 1.3) volta
+  `CKR_MECHANISM_INVALID` mesmo com parâmetros, e não
+  `CKR_MECHANISM_PARAM_INVALID`.
 - O cliente (agente, pareamento e API) desiste de conectar depois de 10 s, em
   vez de esperar para sempre um servidor atrás de um firewall que descarta os
   pacotes.

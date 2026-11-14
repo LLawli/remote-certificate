@@ -174,12 +174,32 @@ pub fn ler<T: DeserializeOwned>(leitor: &mut impl BufRead) -> io::Result<Option<
 }
 
 /// Onde o agente atende: [`ENV_SOCKET`], ou o socket em `$XDG_RUNTIME_DIR`.
+///
+/// Dentro de um Flatpak (o Tessera, por exemplo), o `$XDG_RUNTIME_DIR` do
+/// host não aparece; o que aparece é o diretório do próprio app,
+/// `$XDG_RUNTIME_DIR/app/$FLATPAK_ID`. Ali o agente do host precisa de um
+/// segundo socket (`docs/estacao.md`).
 pub fn caminho_do_socket() -> Option<PathBuf> {
-    if let Some(caminho) = std::env::var_os(ENV_SOCKET) {
+    caminho_em(
+        std::env::var_os(ENV_SOCKET),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("FLATPAK_ID"),
+    )
+}
+
+fn caminho_em(
+    socket: Option<std::ffi::OsString>,
+    execucao: Option<std::ffi::OsString>,
+    flatpak: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if let Some(caminho) = socket {
         return Some(PathBuf::from(caminho));
     }
-    let execucao = std::env::var_os("XDG_RUNTIME_DIR")?;
-    Some(PathBuf::from(execucao).join(DIRETORIO).join(SOCKET))
+    let mut base = PathBuf::from(execucao?);
+    if let Some(app) = flatpak.filter(|id| !id.is_empty()) {
+        base = base.join("app").join(app);
+    }
+    Some(base.join(DIRETORIO).join(SOCKET))
 }
 
 /// A face conectada ao agente.
@@ -277,6 +297,37 @@ mod testes {
             ler::<DaFace>(&mut &b""[..]).unwrap().is_none(),
             "fim é None"
         );
+    }
+
+    #[test]
+    fn o_socket_dentro_de_um_flatpak_fica_no_diretorio_do_app() {
+        let caminho = |socket: Option<&str>, flatpak: Option<&str>| {
+            caminho_em(
+                socket.map(Into::into),
+                Some("/run/user/1000".into()),
+                flatpak.map(Into::into),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            caminho(None, None),
+            PathBuf::from("/run/user/1000/remote-certificate/agente.sock")
+        );
+        assert_eq!(
+            caminho(None, Some("io.github.pedrohqb.Tessera")),
+            PathBuf::from(
+                "/run/user/1000/app/io.github.pedrohqb.Tessera/remote-certificate/agente.sock"
+            )
+        );
+        assert_eq!(
+            caminho(
+                Some("/outro/agente.sock"),
+                Some("io.github.pedrohqb.Tessera")
+            ),
+            PathBuf::from("/outro/agente.sock"),
+            "a variável explícita ganha"
+        );
+        assert!(caminho_em(None, None, None).is_none());
     }
 
     #[test]

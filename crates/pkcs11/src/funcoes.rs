@@ -697,17 +697,15 @@ fn rv_da_falha(tipo: TipoDeFalha) -> CK_RV {
     }
 }
 
-/// O mecanismo pedido, sem parâmetro. Nenhum dos que a face expõe tem; um
-/// parâmetro é sinal de que o hospedeiro queria PSS ou OAEP.
-unsafe fn ler_mecanismo(pMechanism: *mut CK_MECHANISM) -> Result<CK_MECHANISM_TYPE, CK_RV> {
+/// O mecanismo pedido, e se veio com parâmetro. Nenhum dos que a face expõe
+/// tem; um parâmetro é sinal de que o hospedeiro queria PSS ou OAEP.
+unsafe fn ler_mecanismo(pMechanism: *mut CK_MECHANISM) -> Result<(CK_MECHANISM_TYPE, bool), CK_RV> {
     if pMechanism.is_null() {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let mecanismo = &*pMechanism;
-    if mecanismo.ulParameterLen != 0 || !mecanismo.pParameter.is_null() {
-        return Err(CKR_MECHANISM_PARAM_INVALID);
-    }
-    Ok(mecanismo.mechanism)
+    let com_parametro = mecanismo.ulParameterLen != 0 || !mecanismo.pParameter.is_null();
+    Ok((mecanismo.mechanism, com_parametro))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -730,7 +728,7 @@ unsafe fn iniciar(
     let Some(slot) = modulo.slot_da_sessao(hSession) else {
         return CKR_SESSION_HANDLE_INVALID;
     };
-    let mecanismo = match ler_mecanismo(pMechanism) {
+    let (mecanismo, com_parametro) = match ler_mecanismo(pMechanism) {
         Ok(m) => m,
         Err(rv) => return rv,
     };
@@ -749,8 +747,14 @@ unsafe fn iniciar(
         Uso::Assinar => chave.mecanismos.contains(&mecanismo),
         Uso::Cifrar => mecanismo == CKM_RSA_PKCS && chave.mecanismos.contains(&CKM_RSA_PKCS),
     };
+    // Primeiro se o mecanismo existe: um RSA-PSS pedido com os parâmetros
+    // dele é "não suportado" (o token não serve para TLS 1.3), não
+    // "parâmetro errado".
     if !permitido {
         return CKR_MECHANISM_INVALID;
+    }
+    if com_parametro {
+        return CKR_MECHANISM_PARAM_INVALID;
     }
     // Cifrar com a pública não precisa do login; assinar precisa.
     if uso == Uso::Assinar && !logado {

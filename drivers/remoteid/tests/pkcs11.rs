@@ -405,6 +405,32 @@ fn a_face_e_um_token_local_que_assina_com_o_pin_pessoal_e_a_janela_do_otp() {
     );
     assert_eq!(n, 256);
 
+    // RSA-PSS (o TLS 1.3) não é do token: "não suportado", mesmo com os
+    // parâmetros dele, e não "parâmetro errado".
+    let mut parametros = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CKM_SHA256,
+        mgf: CKG_MGF1_SHA256,
+        sLen: 32,
+    };
+    let mut pss = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_PSS,
+        pParameter: (&raw mut parametros).cast(),
+        ulParameterLen: size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        chamar!(C_SignInit(sessao, &mut pss, privada)),
+        CKR_MECHANISM_INVALID
+    );
+    let mut com_lixo = CK_MECHANISM {
+        mechanism: CKM_SHA256_RSA_PKCS,
+        pParameter: (&raw mut parametros).cast(),
+        ulParameterLen: size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        chamar!(C_SignInit(sessao, &mut com_lixo, privada)),
+        CKR_MECHANISM_PARAM_INVALID
+    );
+
     // O C_Logout fecha o login.
     assert_eq!(chamar!(C_Logout(sessao)), CKR_OK);
     assert_eq!(
