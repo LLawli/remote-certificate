@@ -6,18 +6,18 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use protocolo::{
-    Apresentacao, Chave, Configurado, Fator, Listagem, Mecanismo, Segredo, TipoDeErro,
-};
-use rsa::PublicKey;
+use protocolo::{Apresentacao, Configurado, Fator, Listagem, Mecanismo, Segredo, TipoDeErro};
+use rede::agente::{Aviso, Conexao, DoAgente, DoServidor, TipoDeFalha};
+use rede::api::{Assinatura, Cliente, EstadoDaAssinatura, FalhaDaApi, PedidoDeAssinatura};
+use rede::pareamento::parear;
+use rede::tls::Identidade;
 use rsa::pkcs1v15::Pkcs1v15Sign;
-use rsa::pkcs8::DecodePublicKey;
-use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave, travar};
+use servidor::banco::{Banco, IdDoToken, travar};
 use servidor::driver::{Conversa, Driver, Falha, Responder};
 use servidor::fatores::{Motivo, Pessoa};
 use servidor::pin::{self, Autenticado};
@@ -25,75 +25,10 @@ use servidor::servico::{self, Estado};
 use servidor::token::{FalhaDoToken, GuardaNoBanco, Token};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
-use x509_cert::Certificate;
-use x509_cert::der::{Decode, Encode};
-
-use std::time::Duration;
-
-use rede::agente::{Aviso, Conexao, DoAgente, DoServidor, TipoDeFalha};
-use rede::api::{Assinatura, Cliente, EstadoDaAssinatura, FalhaDaApi, PedidoDeAssinatura};
-use rede::pareamento::parear;
-use rede::tls::Identidade;
 use tokio::net::TcpListener;
 
-const EMAIL: &str = "teste@remoteid.local";
-const SENHA: &str = "teste-1234";
-const OTP: &str = "123456";
-const PIN_PESSOAL: &str = "pessoal-2468";
-const DOCUMENTO: &[u8] = b"procuracao de teste";
-
-fn binario(variavel: &str) -> PathBuf {
-    std::env::var_os(variavel)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("falta {variavel}: rode eval \"$(scripts/remoteid.sh)\""))
-}
-
-/// O servidor falso do RemoteID, morto quando o teste acaba.
-struct Mock {
-    processo: Child,
-    url: String,
-}
-
-impl Mock {
-    fn subir() -> Mock {
-        let mut processo = Command::new(binario("REMOTEID_MOCK_BIN"))
-            .arg("0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut url = String::new();
-        BufReader::new(processo.stdout.take().unwrap())
-            .read_line(&mut url)
-            .unwrap();
-        Mock {
-            processo,
-            url: url.trim().to_string(),
-        }
-    }
-
-    /// Esquece as sessões, como o servidor real faz quando elas vencem.
-    fn expirar_sessoes(&self) {
-        ureq::post(format!("{}/_mock/expirar", self.url))
-            .send_empty()
-            .unwrap();
-    }
-}
-
-impl Drop for Mock {
-    fn drop(&mut self) {
-        let _ = self.processo.kill();
-        let _ = self.processo.wait();
-    }
-}
-
-/// Um diretório só deste teste, no target (fora do tmpfs).
-fn diretorio(nome: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("remoteid-{nome}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+mod comum;
+use comum::*;
 
 /// O driver como o servidor o lança, com o stderr num arquivo para conferir.
 fn lancar(dir: &Path, mock: &Mock) -> Driver {
@@ -111,25 +46,6 @@ fn lancar(dir: &Path, mock: &Mock) -> Driver {
             .stderr(stderr),
     )
     .expect("o driver sobe e se apresenta")
-}
-
-fn valores(email: &str, senha: &str) -> BTreeMap<String, Segredo> {
-    BTreeMap::from([
-        ("email".to_string(), Segredo::novo(email.into())),
-        ("senha".to_string(), Segredo::novo(senha.into())),
-    ])
-}
-
-/// O banco do servidor no diretório do teste, com a chave num arquivo como o
-/// secret do Docker. Abrir de novo é o servidor reiniciando.
-fn banco(dir: &Path) -> Arc<Mutex<Banco>> {
-    let arquivo = dir.join("chave");
-    if !arquivo.exists() {
-        let chave = ChaveDoBanco::aleatorio().unwrap();
-        std::fs::write(&arquivo, chave.expor()).unwrap();
-    }
-    let banco = Banco::abrir(&dir.join("banco.db"), ler_chave(&arquivo).unwrap()).unwrap();
-    Arc::new(Mutex::new(banco))
 }
 
 /// Um servidor com o token do teste no banco: criado na primeira vez, lido
@@ -206,16 +122,6 @@ impl Pessoa for Digita {
             Segredo::novo(codigo.into()),
         )]))
     }
-}
-
-fn chave_publica(chave: &Chave) -> PublicKey {
-    let certificado = Certificate::from_der(&chave.certificado).expect("X.509 em DER");
-    let spki = certificado
-        .tbs_certificate()
-        .subject_public_key_info()
-        .to_der()
-        .unwrap();
-    PublicKey::from_public_key_der(&spki).expect("chave RSA")
 }
 
 fn digest_info(prefixo: &[u8], resumo: &[u8]) -> Vec<u8> {
@@ -646,44 +552,6 @@ fn o_pin_pessoal_nunca_chega_ao_driver() {
     );
 }
 
-/// O token configurado no banco como o administrador faria: o driver com os
-/// argumentos dele, e a conta pelo `configurar`.
-fn token_no_banco(dir: &Path, mock: &Mock, banco: &Arc<Mutex<Banco>>) -> IdDoToken {
-    let estado = dir.join("estado");
-    std::fs::create_dir_all(&estado).unwrap();
-    let argumentos: Vec<String> = [
-        "--estado".into(),
-        estado.display().to_string(),
-        "--remoteid".into(),
-        binario("REMOTEID_BIN").display().to_string(),
-        "--servidor".into(),
-        mock.url.clone(),
-    ]
-    .into();
-    let executavel = env!("CARGO_BIN_EXE_remote-certificate-driver-remoteid");
-    let id = travar(banco)
-        .criar_token("RemoteID", executavel, &argumentos)
-        .unwrap();
-    configurar_por_fora(banco, id);
-    id
-}
-
-/// O que `remote-certificate token configurar` faz: outro processo do driver,
-/// com o serviço rodando ou não.
-fn configurar_por_fora(banco: &Arc<Mutex<Banco>>, id: IdDoToken) {
-    let registro = travar(banco)
-        .tokens()
-        .unwrap()
-        .into_iter()
-        .find(|t| t.id == id)
-        .unwrap();
-    let driver = Driver::lancar(Command::new(&registro.driver).args(&registro.argumentos)).unwrap();
-    Token::abrir(driver, GuardaNoBanco::novo(banco.clone(), id))
-        .unwrap()
-        .configurar(valores(EMAIL, SENHA))
-        .unwrap();
-}
-
 /// A próxima mensagem que não é aviso.
 async fn resposta(conexao: &mut Conexao) -> DoServidor {
     loop {
@@ -887,10 +755,6 @@ async fn esperar(cliente: &mut Cliente, id: &str) -> Assinatura {
         .unwrap()
 }
 
-fn otp_da_api(codigo: &str) -> BTreeMap<String, Segredo> {
-    BTreeMap::from([("otp".to_string(), Segredo::novo(codigo.into()))])
-}
-
 #[test]
 fn o_sistema_assina_um_lote_pela_api_com_o_pin_e_o_otp() {
     let mock = Mock::subir();
@@ -1052,22 +916,6 @@ fn o_sistema_assina_um_lote_pela_api_com_o_pin_e_o_otp() {
         travar(&banco).verificar_auditoria().unwrap(),
         servidor::auditoria::Verificacao::Integra { .. }
     ));
-}
-
-/// A janela do OTP no teste: responde os códigos na ordem e guarda as
-/// perguntas. Sem código, fecha a janela.
-#[derive(Default)]
-struct JanelaDeTeste {
-    codigos: Mutex<VecDeque<&'static str>>,
-    perguntas: Mutex<Vec<agente::dialogo::Pergunta>>,
-}
-
-impl agente::dialogo::Dialogo for JanelaDeTeste {
-    fn perguntar(&self, pergunta: &agente::dialogo::Pergunta) -> Option<BTreeMap<String, Segredo>> {
-        self.perguntas.lock().unwrap().push(pergunta.clone());
-        let codigo = self.codigos.lock().unwrap().pop_front()?;
-        Some(otp_da_api(codigo))
-    }
 }
 
 /// A face (o módulo PKCS#11) conectada ao agente, assim que ele atende.

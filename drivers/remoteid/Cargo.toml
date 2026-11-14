@@ -21,7 +21,9 @@ sha2 = "0.11"
 
 [dev-dependencies]
 agente.workspace = true
+cryptoki-sys = "0.5"
 ipc.workspace = true
+pkcs11.workspace = true
 rede = { path = "../../crates/rede" }
 servidor = { path = "../../crates/servidor" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

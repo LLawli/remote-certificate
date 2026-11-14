@@ -62,6 +62,13 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   `esquecer` e `servir`. Guarda a chave do dispositivo num arquivo só do
   usuário, atende as faces por um socket Unix e pergunta o OTP numa janela à
   parte. Cada aplicação tem o seu login do PIN pessoal.
+- O módulo PKCS#11 da estação (`libremote_certificate_pkcs11.so`): cada token
+  do servidor aparece como um token local que pede o PIN pessoal no login e
+  assina com `CKM_RSA_PKCS` e `CKM_SHA256/384/512_RSA_PKCS`. Testado com o
+  `pkcs11-tool`, o `p11tool` e pelo `p11-kit-proxy`.
+- `remote-certificate-dialogo`, a janela do OTP no Linux.
+- `scripts/laboratorio.sh`: um servidor e uma estação inteiros nesta máquina,
+  para testar o módulo com programas de verdade.
 - API HTTP `/v1` para sistemas integrados: `GET /v1/chaves` e a assinatura
   como recurso em `/v1/assinaturas`, com um lote de até 1000 documentos por
   PIN pessoal, o pedido do OTP no meio, a desistência e a consulta que espera

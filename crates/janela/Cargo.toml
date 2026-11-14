@@ -1,0 +1,24 @@
+[package]
+name = "janela"
+description = "A janela que pergunta à pessoa o fator que o token pediu (o OTP), no Linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "remote-certificate-dialogo"
+path = "src/main.rs"
+
+# Só a API até a libadwaita 1.4 (ToolbarView, Banner): a 1.5 do Ubuntu 24.04
+# compila e roda.
+[dependencies]
+adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+gtk = { package = "gtk4", version = "0.11" }
+ipc.workspace = true
+protocolo.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

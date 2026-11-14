@@ -171,6 +171,10 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
   desiste.
 - Cada aplicação tem a sua conexão com o servidor e o seu login, como o
   `C_Login` do PKCS#11: o PIN que o Firefox mandou não assina pelo PJeOffice.
+- A face (o módulo PKCS#11) roda dentro do processo de cada aplicação: não
+  guarda o PIN depois do `C_Login`, não escreve nada no stdout nem no stderr,
+  e o registro dela leva só a função, o resultado, o tamanho e o começo do
+  SHA-256 dos dados, nunca o PIN nem o documento.
 - **Sessão que expira**: depois de um tempo sem uso, o servidor esquece o login
   do PIN pessoal e a próxima operação pede o PIN de novo. A medir na VM: como
   Firefox, PJeOffice e Serpro reagem a `CKR_USER_NOT_LOGGED_IN` no meio do uso.

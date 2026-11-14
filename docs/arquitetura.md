@@ -123,6 +123,40 @@ O agente é `crates/agente` (binário `remote-certificate-agente`):
   stdout. Fechar a janela, ou 3 minutos sem resposta, é desistir. A face só
   recebe o fim.
 
+A face Linux é `crates/pkcs11` (`libremote_certificate_pkcs11.so`), portada
+do módulo PKCS#11 do RemoteID-linux:
+
+- Um slot por token do servidor, com o certificado, a chave privada e a
+  pública de cada chave RSA. A listagem vem do agente e vale 10 s; com a
+  conexão ocupada por uma assinatura, fica a anterior. Sem token nenhum
+  (agente parado, computador não pareado), fica um slot com um token vazio:
+  um módulo sem token deixa quem usa o crate `cryptoki` pelo RPC do p11-kit em
+  laço infinito.
+- O token anuncia `CKF_LOGIN_REQUIRED`, e o `C_Login` leva o PIN pessoal ao
+  servidor; o PIN errado aparece nos flags (`COUNT_LOW`, `FINAL_TRY`,
+  `LOCKED`). Os objetos não são privados: aparecem antes do login, como num
+  token físico.
+- Expõe só `CKM_RSA_PKCS` e `CKM_SHA{256,384,512}_RSA_PKCS`, e só os que a
+  chave declara. Os dados vão crus com o mecanismo, até uns 3 MiB: quem
+  resume é o driver. RSA-PSS e ECDSA ficam de fora, porque o contrato não
+  leva os parâmetros deles.
+- O `C_Sign` e o `C_Login` soltam a trava do módulo antes de ir ao agente: a
+  janela do OTP aberta não congela a aplicação. Há `C_SignUpdate` e
+  `C_SignFinal` (o BouncyCastle do PJeOffice só assina assim) e `C_Encrypt`
+  com a chave pública (o signer4j do PJeOffice precisa do `CKF_ENCRYPT`).
+- Nenhum `panic` atravessa a fronteira C, e cada chamada vai a um registro
+  (`$XDG_STATE_HOME/remote-certificate/pkcs11.log`, até 1 MiB e um `.1`): as
+  de rotina num anel em memória, que só vai ao disco junto de uma operação, um
+  erro ou um `panic`. O PIN e os dados não entram.
+
+A janela do OTP no Linux é `crates/janela` (`remote-certificate-dialogo`), GTK 4
+com libadwaita: um campo por fator pedido, a recusa num banner, e fechar ou
+Esc é desistir. Sem `application_id`, para abrir também dentro de um sandbox.
+
+`scripts/laboratorio.sh` sobe nesta máquina, pelas CLIs de verdade, o servidor
+falso do RemoteID, o servidor com o driver e o agente pareado, e deixa o módulo
+pronto para `pkcs11-tool`, `p11tool` ou um navegador.
+
 O agente fala com o servidor por um WebSocket em `/v1/agente`, sobre o mTLS
 do dispositivo, com uma mensagem JSON por quadro (`rede::agente`):
 

@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "crates/agente",
     "crates/ipc",
+    "crates/janela",
     "crates/memoria",
+    "crates/pkcs11",
     "crates/protocolo",
     "crates/rede",
     "crates/servidor",
@@ -23,6 +25,7 @@ publish = false
 agente = { path = "crates/agente" }
 ipc = { path = "crates/ipc" }
 memoria = { path = "crates/memoria" }
+pkcs11 = { path = "crates/pkcs11" }
 protocolo = { path = "crates/protocolo" }
 rede = { path = "crates/rede" }
 base64 = "0.22"

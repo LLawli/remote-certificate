@@ -2,8 +2,9 @@
 //! processo que outro do mesmo usuário não consegue inspecionar
 //! (`docs/seguranca.md`).
 //!
-//! O único `unsafe` do projeto mora aqui, em volta de uma página de memória
-//! que só este módulo conhece.
+//! O `unsafe` daqui fica em volta de uma página de memória que só este módulo
+//! conhece. O outro lugar do projeto com `unsafe` é a face PKCS#11
+//! (`crates/pkcs11`), que é uma fronteira C por natureza.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!(

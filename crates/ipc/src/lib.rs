@@ -8,6 +8,8 @@
 //! resposta; quando o token pede o OTP, é o agente quem pergunta à pessoa,
 //! numa janela, e a face só recebe o fim.
 
+pub mod janela;
+
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;

@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A janela do OTP da estação (crates/janela) é GTK 4 com libadwaita.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

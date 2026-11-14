@@ -1,0 +1,31 @@
+[package]
+name = "pkcs11"
+description = "A face Linux da estação: o módulo PKCS#11 que mostra os tokens do servidor como um token local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# O `.so` que o p11-kit carrega (cdylib) e a mesma coisa como crate, para os
+# testes chamarem a tabela de funções sem `dlopen`.
+[lib]
+name = "remote_certificate_pkcs11"
+crate-type = ["cdylib", "rlib"]
+
+# Leve de propósito: roda dentro do navegador e do assinador. Sem tokio, sem
+# TLS: a rede é do agente.
+[dependencies]
+cryptoki-sys = "0.5"
+# O C_Encrypt com a chave pública (o signer4j do PJeOffice) pede aleatoriedade.
+getrandom = { version = "0.4", features = ["sys_rng"] }
+rand_core = "0.10"
+ipc.workspace = true
+protocolo.workspace = true
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+serde_json.workspace = true
+sha2 = "0.11"
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
