@@ -11,8 +11,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-use protocolo::{Chave, Mecanismo};
-use rede::agente::ChaveDoToken;
+use protocolo::{Chave, Mecanismo, TipoDeErro};
+use rede::agente::{ChaveDoToken, Erro, TipoDeFalha};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, oneshot};
 
@@ -37,6 +37,41 @@ pub enum Evento {
 pub enum FalhaDaOperacao {
     TokenDesconhecido,
     Token(FalhaDoToken),
+}
+
+impl FalhaDaOperacao {
+    /// A falha como o cliente a vê. O erro do banco não sai do servidor.
+    pub fn para_o_cliente(self) -> Erro {
+        let falha_do_token = match self {
+            FalhaDaOperacao::TokenDesconhecido => {
+                return erro(TipoDeFalha::TokenDesconhecido, "não há esse token");
+            }
+            FalhaDaOperacao::Token(f) => f,
+        };
+        let tipo = match &falha_do_token {
+            FalhaDoToken::Desatualizado(_) => TipoDeFalha::TokenParado,
+            FalhaDoToken::Cancelado(Motivo::PessoaDesistiu | Motivo::RespostaIncompleta(_)) => {
+                TipoDeFalha::Cancelado
+            }
+            FalhaDoToken::Driver(Falha::Driver(erro)) => match erro.tipo {
+                TipoDeErro::ChaveAusente => TipoDeFalha::ChaveAusente,
+                TipoDeErro::MecanismoNaoSuportado => TipoDeFalha::MecanismoNaoSuportado,
+                TipoDeErro::Cancelado => TipoDeFalha::Cancelado,
+                _ => TipoDeFalha::Token,
+            },
+            FalhaDoToken::Banco(_) => return erro(TipoDeFalha::Interno, "falha no servidor"),
+            _ => TipoDeFalha::Token,
+        };
+        erro(tipo, falha_do_token.to_string())
+    }
+}
+
+pub fn erro(tipo: TipoDeFalha, mensagem: impl Into<String>) -> Erro {
+    Erro {
+        tipo,
+        mensagem: mensagem.into(),
+        restantes: None,
+    }
 }
 
 /// Quem pediu a assinatura, dono do canal até a pessoa.
@@ -82,6 +117,10 @@ impl Tokens {
             filas.insert(nome, fila);
         }
         Ok(Tokens { filas })
+    }
+
+    pub fn existe(&self, token: &str) -> bool {
+        self.filas.contains_key(token)
     }
 
     /// As chaves de todos os tokens. Um token que falha fica de fora.

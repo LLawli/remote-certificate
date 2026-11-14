@@ -10,17 +10,17 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
-use protocolo::{Fator, Segredo, TipoDeErro};
-use rede::agente::{Aviso, DoAgente, DoServidor, Erro, FatorPedido, TipoDeFalha};
+use protocolo::{Fator, Segredo};
+use rede::agente::{Aviso, DoAgente, DoServidor, FatorPedido, TipoDeFalha};
 use tokio::sync::{broadcast, mpsc as canal};
 
 use crate::banco::{IdDoDispositivo, Situacao, travar};
 use crate::driver::Falha;
-use crate::fatores::{Motivo, Pessoa};
-use crate::pin::{self, Autenticado, ERROS_PARA_BLOQUEAR, FalhaDoPin};
-use crate::servico::Estado;
+use crate::fatores::Pessoa;
+use crate::pin::{Autenticado, ERROS_PARA_BLOQUEAR};
+use crate::servico::{BLOQUEADO, Estado};
 use crate::token::FalhaDoToken;
-use crate::tokens::{Evento, FalhaDaOperacao};
+use crate::tokens::{Evento, FalhaDaOperacao, erro};
 
 /// Quanto o login do PIN pessoal dura sem uso. Provisório: a medir na VM como
 /// os assinadores reagem a pedir o PIN de novo.
@@ -80,11 +80,7 @@ struct Sessao {
 fn falha(id: Option<u64>, tipo: TipoDeFalha, mensagem: impl Into<String>) -> DoServidor {
     DoServidor::Falha {
         id,
-        erro: Erro {
-            tipo,
-            mensagem: mensagem.into(),
-            restantes: None,
-        },
+        erro: erro(tipo, mensagem),
     }
 }
 
@@ -168,7 +164,7 @@ impl Sessao {
                 }
                 let id = id_da(&mensagem);
                 return (
-                    vec![falha(Some(id), TipoDeFalha::Bloqueado, bloqueado())],
+                    vec![falha(Some(id), TipoDeFalha::Bloqueado, BLOQUEADO)],
                     Depois::Seguir,
                 );
             }
@@ -228,36 +224,15 @@ impl Sessao {
     }
 
     async fn entrar(&mut self, id: u64, pin: Segredo) -> DoServidor {
-        let banco = self.estado.banco.clone();
-        let dispositivo = self.dispositivo;
-        // O Argon2id leva uma fração de segundo: fora das threads do tokio.
-        let conferido =
-            tokio::task::spawn_blocking(move || pin::conferir(&banco, dispositivo, &pin)).await;
-        match conferido {
-            Ok(Ok(autenticado)) => {
+        match self.estado.conferir_pin(self.dispositivo, pin).await {
+            Ok(autenticado) => {
                 self.entrada = Some((autenticado, Instant::now()));
                 DoServidor::Entrou { id }
             }
-            Ok(Err(FalhaDoPin::Errado { restantes })) => {
+            Err(erro) => {
                 self.entrada = None;
-                DoServidor::Falha {
-                    id: Some(id),
-                    erro: Erro {
-                        tipo: TipoDeFalha::PinErrado,
-                        mensagem: "PIN pessoal errado".into(),
-                        restantes: Some(restantes),
-                    },
-                }
+                DoServidor::Falha { id: Some(id), erro }
             }
-            Ok(Err(FalhaDoPin::Bloqueado)) => {
-                self.entrada = None;
-                let _ = self
-                    .estado
-                    .eventos
-                    .send(Evento::DispositivoBloqueado(self.dispositivo));
-                falha(Some(id), TipoDeFalha::Bloqueado, bloqueado())
-            }
-            Ok(Err(_)) | Err(_) => falha(Some(id), TipoDeFalha::Interno, "falha no servidor"),
         }
     }
 
@@ -322,7 +297,10 @@ impl Sessao {
                 self.em_curso = None;
                 vec![match resultado {
                     Ok(assinatura) => DoServidor::Assinatura { id, assinatura },
-                    Err(falha_da_operacao) => erro_da_operacao(id, falha_da_operacao),
+                    Err(falha_da_operacao) => DoServidor::Falha {
+                        id: Some(id),
+                        erro: falha_da_operacao.para_o_cliente(),
+                    },
                 }]
             }
         }
@@ -338,10 +316,6 @@ impl Sessao {
     }
 }
 
-fn bloqueado() -> &'static str {
-    "dispositivo bloqueado; o administrador desbloqueia"
-}
-
 fn id_da(mensagem: &DoAgente) -> u64 {
     match mensagem {
         DoAgente::Entrar { id, .. }
@@ -351,35 +325,4 @@ fn id_da(mensagem: &DoAgente) -> u64 {
         | DoAgente::Desistir { id }
         | DoAgente::Sair { id } => *id,
     }
-}
-
-fn erro_da_operacao(id: u64, falha_da_operacao: FalhaDaOperacao) -> DoServidor {
-    let falha_do_token = match falha_da_operacao {
-        FalhaDaOperacao::TokenDesconhecido => {
-            return falha(
-                Some(id),
-                TipoDeFalha::TokenDesconhecido,
-                "não há esse token",
-            );
-        }
-        FalhaDaOperacao::Token(f) => f,
-    };
-    let tipo = match &falha_do_token {
-        FalhaDoToken::Desatualizado(_) => TipoDeFalha::TokenParado,
-        FalhaDoToken::Cancelado(Motivo::PessoaDesistiu | Motivo::RespostaIncompleta(_)) => {
-            TipoDeFalha::Cancelado
-        }
-        FalhaDoToken::Driver(Falha::Driver(erro)) => match erro.tipo {
-            TipoDeErro::ChaveAusente => TipoDeFalha::ChaveAusente,
-            TipoDeErro::MecanismoNaoSuportado => TipoDeFalha::MecanismoNaoSuportado,
-            TipoDeErro::Cancelado => TipoDeFalha::Cancelado,
-            _ => TipoDeFalha::Token,
-        },
-        // O erro do banco não sai do servidor.
-        FalhaDoToken::Banco(_) => {
-            return falha(Some(id), TipoDeFalha::Interno, "falha no servidor");
-        }
-        _ => TipoDeFalha::Token,
-    };
-    falha(Some(id), tipo, falha_do_token.to_string())
 }

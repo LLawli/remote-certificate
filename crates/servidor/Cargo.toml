@@ -13,8 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 argon2 = { version = "0.6", features = ["zeroize"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 data-encoding = "2"
+getrandom = { version = "0.3", features = ["std"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 memoria.workspace = true

@@ -20,22 +20,25 @@ use axum::routing::{get, post};
 use data_encoding::BASE32_NOPAD;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
-use rede::agente::LIMITE_DA_MENSAGEM;
+use protocolo::Segredo;
+use rede::agente::{Erro, LIMITE_DA_MENSAGEM, TipoDeFalha};
 use rede::pareamento::{
     self, CodigoDePareamento, LIMITE_DO_CORPO, Pareamento, PedidoDePareamento, TAMANHO_DO_SEGREDO,
 };
 use rede::tls::{self, Identidade, Porteiro, config_do_servidor};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
 use crate::agente;
+use crate::api::{self, Assinaturas};
 use crate::banco::{
     Banco, FalhaDoBanco, IdDoDispositivo, IdDoUsuario, IdentidadeGuardada, Instante, travar,
 };
-use crate::tokens::{Evento, Tokens};
+use crate::pin::{self, Autenticado, FalhaDoPin};
+use crate::tokens::{Evento, Tokens, erro};
 
 /// Onde o container atende.
 pub const ENDERECO_PADRAO: &str = "0.0.0.0:8443";
@@ -134,12 +137,20 @@ impl Porteiro for PorteiroDoBanco {
 
 /// Quantos eventos um agente lento pode deixar para trás.
 const EVENTOS_NA_FILA: usize = 64;
+/// Quantas conferências do PIN pessoal rodam ao mesmo tempo. Cada uma ocupa
+/// 64 MiB e uns 106 ms de CPU (medido em 2026-11-14): 4 juntas ficam em
+/// 256 MiB, e as outras esperam a vez.
+const CONFERENCIAS_SIMULTANEAS: usize = 4;
+
+pub const BLOQUEADO: &str = "dispositivo bloqueado; o administrador desbloqueia";
 
 /// O que todas as conexões compartilham.
 pub struct Estado {
     pub banco: Arc<Mutex<Banco>>,
     pub tokens: Tokens,
     pub eventos: broadcast::Sender<Evento>,
+    assinaturas: Assinaturas,
+    conferencias: Semaphore,
 }
 
 impl Estado {
@@ -154,13 +165,49 @@ impl Estado {
             banco,
             tokens,
             eventos,
+            assinaturas: Assinaturas::default(),
+            conferencias: Semaphore::new(CONFERENCIAS_SIMULTANEAS),
         }))
+    }
+
+    pub(crate) fn assinaturas(&self) -> &Assinaturas {
+        &self.assinaturas
+    }
+
+    /// Confere o PIN pessoal digitado em `dispositivo`, fora das threads do
+    /// tokio. Quando o erro bloqueia o dispositivo, avisa os agentes dele.
+    pub(crate) async fn conferir_pin(
+        &self,
+        dispositivo: IdDoDispositivo,
+        pin: Segredo,
+    ) -> Result<Autenticado, Erro> {
+        let _vez = self
+            .conferencias
+            .acquire()
+            .await
+            .expect("o semáforo nunca fecha");
+        let banco = self.banco.clone();
+        let conferido =
+            tokio::task::spawn_blocking(move || pin::conferir(&banco, dispositivo, &pin)).await;
+        match conferido {
+            Ok(Ok(autenticado)) => Ok(autenticado),
+            Ok(Err(FalhaDoPin::Errado { restantes })) => Err(Erro {
+                tipo: TipoDeFalha::PinErrado,
+                mensagem: "PIN pessoal errado".into(),
+                restantes: Some(restantes),
+            }),
+            Ok(Err(FalhaDoPin::Bloqueado)) => {
+                let _ = self.eventos.send(Evento::DispositivoBloqueado(dispositivo));
+                Err(erro(TipoDeFalha::Bloqueado, BLOQUEADO))
+            }
+            Ok(Err(_)) | Err(_) => Err(erro(TipoDeFalha::Interno, "falha no servidor")),
+        }
     }
 }
 
 /// Quem está do outro lado de uma conexão que passou do handshake.
 #[derive(Debug, Clone)]
-enum Quem {
+pub(crate) enum Quem {
     Dispositivo(IdDoDispositivo),
     /// Uma chave nova, aceita porque há pareamento pendente.
     Pareando(Arc<Vec<u8>>),
@@ -217,6 +264,14 @@ fn rotas(estado: Arc<Estado>) -> Router {
     Router::new()
         .route(rede::agente::CAMINHO, get(conectar_agente))
         .route(pareamento::CAMINHO, post(parear))
+        .route(rede::api::CHAVES, get(api::chaves))
+        .route(
+            rede::api::ASSINATURAS,
+            post(api::criar).layer(DefaultBodyLimit::max(rede::api::LIMITE_DO_CORPO)),
+        )
+        .route("/v1/assinaturas/{id}", get(api::consultar))
+        .route("/v1/assinaturas/{id}/fatores", post(api::responder))
+        .route("/v1/assinaturas/{id}/desistir", post(api::desistir))
         .fallback(fora_das_rotas)
         .layer(DefaultBodyLimit::max(LIMITE_DO_CORPO))
         .with_state(estado)

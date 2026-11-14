@@ -107,6 +107,13 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   mensagem seguinte.
 - No WebSocket do agente, uma mensagem tem no máximo 4 MiB, e o servidor
   espera a pessoa responder um fator por 3 minutos antes de cancelar.
+- Na API HTTP, o PIN pessoal vai em cada assinatura (um lote conta como uma)
+  e não abre sessão: nenhum identificador de sessão circula para ser roubado,
+  e quem chega ao computador do sistema depois não assina sem o PIN. O corpo
+  de uma assinatura tem no máximo 4 MiB, e um dispositivo tem no máximo 4
+  assinaturas em curso e 64 guardadas em memória.
+- No máximo 4 conferências do PIN pessoal rodam ao mesmo tempo (64 MiB cada):
+  uma enxurrada de pedidos espera a vez em vez de esgotar a memória.
 
 ### Mensagens de fora
 

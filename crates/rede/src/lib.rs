@@ -3,6 +3,7 @@
 //! `docs/arquitetura.md`.
 
 pub mod agente;
+pub mod api;
 pub mod codigo;
 pub mod pareamento;
 pub mod tls;

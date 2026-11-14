@@ -57,4 +57,10 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - O servidor e o driver RemoteID não se deixam inspecionar por outro processo
   nem deixam core dump; o container roda só leitura e sem capabilities.
 - Uma linha do contrato de driver tem no máximo 1 MiB.
-- Imagem de container do servidor, ainda sem a API.
+- Imagem de container do servidor.
+- API HTTP `/v1` para sistemas integrados: `GET /v1/chaves` e a assinatura
+  como recurso em `/v1/assinaturas`, com um lote de até 1000 documentos por
+  PIN pessoal, o pedido do OTP no meio, a desistência e a consulta que espera
+  a assinatura mudar.
+- O PIN pessoal confere no máximo 4 vezes ao mesmo tempo, no agente e na API,
+  para limitar a memória do Argon2id.

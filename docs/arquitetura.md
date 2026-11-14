@@ -51,10 +51,37 @@ as mesmas do driver (listar chaves e mecanismos, assinar). Quando o token pede
 um fator da pessoa (o OTP), a assinatura volta pedindo esse fator, com o rótulo
 para mostrar, e o sistema completa a mesma operação com o código.
 
-O escopo inicial é só esse. A API nasce versionada (`/v1`) e com a operação
-de assinatura como recurso próprio (criar, responder fatores, consultar), para
-que operações novas (assinar em lote, outros formatos) entrem sem quebrar quem
-já integra.
+A API é versionada (`/v1`), JSON sobre o mTLS do dispositivo, e a assinatura é
+um recurso próprio (`rede::api`, `servidor::api`):
+
+- `GET /v1/chaves`: as chaves de todos os tokens. Ler não pede o PIN.
+- `POST /v1/assinaturas` com `pin`, `token`, `chave`, `mecanismo` e
+  `documentos` (um lote de 1 a 1000, em Base64): `201` com a assinatura
+  `em_curso`.
+- `GET /v1/assinaturas/{id}`: `em_curso`, `pedindo_fatores` (com os fatores e
+  a `recusa` quando pede de novo), `concluida` ou `falhou` (com o `erro`), e as
+  `assinaturas` prontas, na ordem dos documentos. Com `?esperar=<segundos>`, a
+  resposta espera enquanto a assinatura está `em_curso`, até 60 s, para o
+  sistema não precisar consultar em laço.
+- `POST /v1/assinaturas/{id}/fatores` com `valores` responde o pedido;
+  `POST /v1/assinaturas/{id}/desistir` cancela o que falta do lote.
+- Uma falha volta com o status HTTP e `{"erro": {"tipo", "mensagem"}}`, os
+  mesmos tipos do agente: `401` PIN errado (com `restantes`), `423` bloqueado,
+  `422` token, chave ou mecanismo que não existem, `429` assinaturas demais em
+  curso, `503` token parado ou falhando.
+
+O PIN pessoal vale para uma assinatura, não para uma sessão: um lote de 100
+documentos assina com um PIN só, mas quem chega ao computador depois não
+assina nada sem digitar o PIN de novo. Cada conferência custa uns 106 ms e
+64 MiB (Argon2id, medido em 2026-11-14), e no máximo 4 rodam juntas, no agente
+e na API. Um token que não existe e um lote fora do tamanho são recusados antes
+do PIN, para um engano não gastar tentativa.
+
+Cada assinatura fica em memória, só para o dispositivo que a criou (para os
+outros, `404`), e continua consultável por 10 minutos depois de terminar.
+Depois de o servidor reiniciar, nenhuma volta; o resultado de cada documento
+fica na auditoria. Um dispositivo tem até 4 assinaturas em curso e 64
+guardadas; bloqueado ou revogado, as em curso dele desistem.
 
 ### Token virtual, para estações
 

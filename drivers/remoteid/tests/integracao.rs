@@ -28,7 +28,10 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, Encode};
 
-use rede::agente::{Conexao, DoAgente, DoServidor, TipoDeFalha};
+use std::time::Duration;
+
+use rede::agente::{Aviso, Conexao, DoAgente, DoServidor, TipoDeFalha};
+use rede::api::{Assinatura, Cliente, EstadoDaAssinatura, FalhaDaApi, PedidoDeAssinatura};
 use rede::pareamento::parear;
 use rede::tls::Identidade;
 use tokio::net::TcpListener;
@@ -806,10 +809,26 @@ fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
             DoServidor::PedidoDeFatores { id: 6, .. }
         ));
         conexao.enviar(&otp(6, OTP)).await.unwrap();
-        assert!(matches!(
-            resposta(&mut conexao).await,
-            DoServidor::Falha { id: Some(6), ref erro } if erro.tipo == TipoDeFalha::TokenParado
-        ));
+        // A falha da assinatura e o aviso aos agentes, em qualquer ordem.
+        let (mut falhou, mut avisou) = (false, false);
+        while !(falhou && avisou) {
+            let mensagem = tokio::time::timeout(Duration::from_secs(30), conexao.receber())
+                .await
+                .expect("a falha e o aviso chegam")
+                .unwrap();
+            match mensagem {
+                DoServidor::Falha {
+                    id: Some(6),
+                    ref erro,
+                } if erro.tipo == TipoDeFalha::TokenParado && !falhou => {
+                    falhou = true;
+                }
+                DoServidor::Aviso {
+                    aviso: Aviso::TokenParado { ref token },
+                } if token == "RemoteID" && !avisou => avisou = true,
+                outra => panic!("esperava a falha e o aviso token_parado: {outra:?}"),
+            }
+        }
 
         // O administrador configura de novo com o serviço rodando, e o
         // servidor volta a assinar sem reiniciar.
@@ -849,6 +868,181 @@ fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
         assert_eq!(linha.token.as_deref(), Some("RemoteID"));
         assert_eq!(linha.mecanismo.as_deref(), Some("CKM_SHA256_RSA_PKCS"));
         assert!(linha.dispositivo.is_some() && linha.chave.is_some());
+    }
+    let tudo = format!("{linhas:?}");
+    for segredo in [PIN_PESSOAL, OTP, SENHA, "999999", "procuracao de teste"] {
+        assert!(!tudo.contains(segredo), "{segredo} na auditoria");
+    }
+    assert!(matches!(
+        travar(&banco).verificar_auditoria().unwrap(),
+        servidor::auditoria::Verificacao::Integra { .. }
+    ));
+}
+
+/// Até a assinatura sair de `em_curso`.
+async fn esperar(cliente: &mut Cliente, id: &str) -> Assinatura {
+    cliente
+        .consultar(id, Some(Duration::from_secs(30)))
+        .await
+        .unwrap()
+}
+
+fn otp_da_api(codigo: &str) -> BTreeMap<String, Segredo> {
+    BTreeMap::from([("otp".to_string(), Segredo::novo(codigo.into()))])
+}
+
+#[test]
+fn o_sistema_assina_um_lote_pela_api_com_o_pin_e_o_otp() {
+    let mock = Mock::subir();
+    let dir = diretorio("api");
+    let banco = banco(&dir);
+    token_no_banco(&dir, &mock, &banco);
+    let hash = pin::hash(&Segredo::novo(PIN_PESSOAL.into())).unwrap();
+    let sistema = travar(&banco).criar_usuario("sistema", &hash).unwrap();
+    let documentos: Vec<Vec<u8>> = (0..3)
+        .map(|i| format!("{} {i}", String::from_utf8_lossy(DOCUMENTO)).into_bytes())
+        .collect();
+
+    let execucao = tokio::runtime::Runtime::new().unwrap();
+    execucao.block_on(async {
+        let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endereco = ouvinte.local_addr().unwrap().to_string();
+        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        tokio::spawn(servico::servir(ouvinte, estado));
+
+        let codigo = servico::novo_pareamento(&banco, sistema, "sistema interno").unwrap();
+        let identidade = Identidade::gerar().unwrap();
+        let pareado = parear(&endereco, &codigo, &identidade).await.unwrap();
+        let mut cliente = Cliente::abrir(&endereco, &identidade, pareado.servidor)
+            .await
+            .unwrap();
+
+        // Ler não pede o PIN.
+        let chaves = cliente.chaves().await.unwrap();
+        assert_eq!(chaves.len(), 1);
+        let publica = chave_publica(&chaves[0].chave);
+        let lote = |pin: &str, documentos: &[Vec<u8>]| PedidoDeAssinatura {
+            pin: Segredo::novo(pin.into()),
+            token: "RemoteID".into(),
+            chave: chaves[0].chave.id.clone(),
+            mecanismo: Mecanismo::Sha256RsaPkcs,
+            documentos: documentos.to_vec(),
+        };
+
+        // PIN errado: nada chega ao token.
+        let errado = cliente.assinar(&lote("0000", &documentos)).await;
+        assert!(
+            matches!(errado, Err(FalhaDaApi::Servidor { status: 401, ref erro })
+                if erro.tipo == TipoDeFalha::PinErrado),
+            "{errado:?}"
+        );
+
+        // Um lote, um PIN: o token pede o OTP no primeiro documento, e um
+        // código errado volta com a recusa.
+        let criada = cliente
+            .assinar(&lote(PIN_PESSOAL, &documentos))
+            .await
+            .unwrap();
+        let pedindo = esperar(&mut cliente, &criada.id).await;
+        let EstadoDaAssinatura::PedindoFatores {
+            fatores,
+            recusa: None,
+        } = pedindo.estado
+        else {
+            panic!("esperava o pedido do OTP: {pedindo:?}");
+        };
+        assert_eq!(
+            fatores.iter().map(|f| f.nome.as_str()).collect::<Vec<_>>(),
+            ["otp"]
+        );
+        cliente
+            .responder(&criada.id, otp_da_api("999999"))
+            .await
+            .unwrap();
+        let de_novo = esperar(&mut cliente, &criada.id).await;
+        assert!(
+            matches!(
+                de_novo.estado,
+                EstadoDaAssinatura::PedindoFatores {
+                    recusa: Some(_),
+                    ..
+                }
+            ),
+            "{de_novo:?}"
+        );
+        cliente
+            .responder(&criada.id, otp_da_api(OTP))
+            .await
+            .unwrap();
+
+        // O OTP abre a sessão do RemoteID, que atende o resto do lote.
+        let concluida = esperar(&mut cliente, &criada.id).await;
+        assert_eq!(concluida.estado, EstadoDaAssinatura::Concluida);
+        assert_eq!(concluida.assinaturas.len(), documentos.len());
+        for (documento, assinatura) in documentos.iter().zip(&concluida.assinaturas) {
+            publica
+                .verify(
+                    Pkcs1v15Sign::new::<Sha256>(),
+                    &Sha256::digest(documento),
+                    assinatura,
+                )
+                .expect("cada assinatura confere com o seu documento");
+        }
+
+        // O PIN vale só para aquele lote: o próximo pede de novo.
+        let sem_pin = cliente.assinar(&lote("", &documentos[..1])).await;
+        assert!(
+            matches!(sem_pin, Err(FalhaDaApi::Servidor { status: 401, .. })),
+            "{sem_pin:?}"
+        );
+        let unica = cliente
+            .assinar(&lote(PIN_PESSOAL, &documentos[..1]))
+            .await
+            .unwrap();
+        assert_eq!(
+            esperar(&mut cliente, &unica.id).await.estado,
+            EstadoDaAssinatura::Concluida
+        );
+
+        // Quem desiste do OTP cancela o lote inteiro.
+        mock.expirar_sessoes();
+        let desistida = cliente
+            .assinar(&lote(PIN_PESSOAL, &documentos))
+            .await
+            .unwrap();
+        assert!(matches!(
+            esperar(&mut cliente, &desistida.id).await.estado,
+            EstadoDaAssinatura::PedindoFatores { .. }
+        ));
+        cliente.desistir(&desistida.id).await.unwrap();
+        let cancelada = esperar(&mut cliente, &desistida.id).await;
+        assert!(
+            matches!(
+                cancelada.estado,
+                EstadoDaAssinatura::Falhou { ref erro } if erro.tipo == TipoDeFalha::Cancelado
+            ),
+            "{cancelada:?}"
+        );
+        assert!(cancelada.assinaturas.is_empty());
+    });
+
+    // Uma linha por documento que chegou ao token, com o resumo dele.
+    let linhas = travar(&banco).auditoria(1000).unwrap();
+    let assinaturas: Vec<_> = linhas.iter().filter(|l| l.evento == "assinatura").collect();
+    assert_eq!(
+        assinaturas
+            .iter()
+            .map(|l| l.resultado.as_str())
+            .collect::<Vec<_>>(),
+        ["assinada", "assinada", "assinada", "assinada", "cancelada"]
+    );
+    let resumos: Vec<Vec<u8>> = documentos
+        .iter()
+        .map(|d| Sha256::digest(d).to_vec())
+        .collect();
+    for (linha, resumo) in assinaturas.iter().zip(resumos.iter().chain(&resumos[..1])) {
+        assert_eq!(linha.resumo.as_deref(), Some(resumo.as_slice()));
+        assert_eq!(linha.usuario.as_deref(), Some("sistema"));
     }
     let tudo = format!("{linhas:?}");
     for segredo in [PIN_PESSOAL, OTP, SENHA, "999999", "procuracao de teste"] {

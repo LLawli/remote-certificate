@@ -13,6 +13,7 @@ use hyper_util::rt::TokioIo;
 use protocolo::Mecanismo;
 use protocolo::Segredo;
 use rede::agente::{Aviso, Conexao, DoAgente, DoServidor, FalhaDoAgente, TipoDeFalha};
+use rede::api::{Cliente, EstadoDaAssinatura, FalhaDaApi, PedidoDeAssinatura};
 use rede::pareamento::{self, CodigoDePareamento, FalhaDoPareamento, Pareado};
 use rede::tls::{self, Fixacao, Identidade};
 use servidor::banco::{Banco, ChaveDoBanco, IdDoDispositivo, IdDoUsuario, ler_chave, travar};
@@ -37,6 +38,12 @@ fn abrir(dir: &Path) -> Banco {
 }
 
 async fn subir(nome: &str) -> Servidor {
+    subir_com_tokens(nome, &[]).await
+}
+
+/// Com tokens no banco cujo driver não existe: a assinatura chega ao token e
+/// falha lá.
+async fn subir_com_tokens(nome: &str, tokens: &[&str]) -> Servidor {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rede-{nome}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -46,9 +53,14 @@ async fn subir(nome: &str) -> Servidor {
     )
     .unwrap();
     let banco = Arc::new(Mutex::new(abrir(&dir)));
+    for token in tokens {
+        travar(&banco)
+            .criar_token(token, "nao-existe", &[])
+            .unwrap();
+    }
     let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endereco = ouvinte.local_addr().unwrap().to_string();
-    // Sem tokens no banco: nenhum driver sobe.
+    // Nenhum driver sobe: não há nenhum em /sem-drivers.
     let estado = Estado::iniciar(banco.clone(), Path::new("/sem-drivers")).unwrap();
     tokio::spawn(servico::servir(ouvinte, estado));
     Servidor {
@@ -447,4 +459,155 @@ async fn mensagem_fora_do_protocolo_e_respondida_sem_derrubar() {
         resposta,
         DoServidor::Falha { id: None, ref erro } if erro.tipo == TipoDeFalha::PedidoInvalido
     ));
+}
+
+/// Um sistema integrado pareado, com a conexão aberta.
+async fn sistema(servidor: &Servidor, nome: &str) -> (Cliente, Identidade, Pareado) {
+    let (identidade, pareado) = servidor.parear(nome).await;
+    let cliente = Cliente::abrir(&servidor.endereco, &identidade, pareado.servidor)
+        .await
+        .expect("conecta");
+    (cliente, identidade, pareado)
+}
+
+fn pedido(pin: &str, token: &str, documentos: usize) -> PedidoDeAssinatura {
+    PedidoDeAssinatura {
+        pin: Segredo::novo(pin.into()),
+        token: token.into(),
+        chave: "k".into(),
+        mecanismo: Mecanismo::Sha256RsaPkcs,
+        documentos: vec![b"documento".to_vec(); documentos],
+    }
+}
+
+/// O status e o tipo de uma falha da API.
+fn recusa<T: std::fmt::Debug>(resultado: Result<T, FalhaDaApi>) -> (u16, TipoDeFalha, Option<u32>) {
+    match resultado {
+        Err(FalhaDaApi::Servidor { status, erro }) => (status, erro.tipo, erro.restantes),
+        outro => panic!("esperava uma falha do servidor: {outro:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_le_sem_pin_e_assina_so_com_o_pin() {
+    let servidor = subir_com_tokens("api-pin", &["Falso"]).await;
+    let (mut cliente, _, _) = sistema(&servidor, "sistema").await;
+
+    // Ler não pede o PIN. O token sem driver fica de fora da lista.
+    assert_eq!(cliente.chaves().await.unwrap(), vec![]);
+
+    // PIN errado conta a tentativa e não cria a assinatura.
+    let errado = cliente.assinar(&pedido("0000", "Falso", 1)).await;
+    assert_eq!(recusa(errado), (401, TipoDeFalha::PinErrado, Some(2)));
+
+    // Um token que não existe, um lote vazio ou grande demais e um corpo fora
+    // da API são recusados antes do PIN, sem gastar tentativa.
+    let desconhecido = cliente.assinar(&pedido("0000", "Outro", 1)).await;
+    assert_eq!(recusa(desconhecido).1, TipoDeFalha::TokenDesconhecido);
+    for documentos in [0, rede::api::DOCUMENTOS_POR_LOTE + 1] {
+        let lote = cliente.assinar(&pedido("0000", "Falso", documentos)).await;
+        assert_eq!(recusa(lote), (400, TipoDeFalha::PedidoInvalido, None));
+    }
+    let errado = cliente.assinar(&pedido("0000", "Falso", 1)).await;
+    assert_eq!(recusa(errado), (401, TipoDeFalha::PinErrado, Some(1)));
+
+    // Com o PIN, a assinatura chega ao token, que falha sem driver. O acerto
+    // zerou o contador.
+    let criada = cliente.assinar(&pedido("2468", "Falso", 3)).await.unwrap();
+    assert_eq!(criada.estado, EstadoDaAssinatura::EmCurso);
+    let terminada = cliente
+        .consultar(&criada.id, Some(std::time::Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            terminada.estado,
+            EstadoDaAssinatura::Falhou { ref erro } if erro.tipo == TipoDeFalha::Token
+        ),
+        "{terminada:?}"
+    );
+    assert!(terminada.assinaturas.is_empty());
+    let errado = cliente.assinar(&pedido("0000", "Falso", 1)).await;
+    assert_eq!(recusa(errado).2, Some(2), "o acerto zera o contador");
+
+    // Sem pedido de fatores em aberto, a resposta é recusada.
+    let fora_de_hora = cliente.responder(&criada.id, Default::default()).await;
+    assert_eq!(
+        recusa(fora_de_hora),
+        (409, TipoDeFalha::PedidoInvalido, None)
+    );
+
+    // A auditoria tem a linha da assinatura que chegou ao token, uma por
+    // documento até a falha.
+    let linhas = travar(&servidor.banco).auditoria(100).unwrap();
+    let assinaturas: Vec<_> = linhas.iter().filter(|l| l.evento == "assinatura").collect();
+    assert_eq!(assinaturas.len(), 1, "{assinaturas:?}");
+    assert_eq!(assinaturas[0].resultado, "driver_caiu");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_assinatura_de_um_dispositivo_some_para_os_outros() {
+    let servidor = subir_com_tokens("api-outro", &["Falso"]).await;
+    let (mut dono, _, _) = sistema(&servidor, "sistema").await;
+    let (mut outro, _, _) = sistema(&servidor, "outro").await;
+
+    let criada = dono.assinar(&pedido("2468", "Falso", 1)).await.unwrap();
+    for falha in [
+        outro.consultar(&criada.id, None).await.err(),
+        outro.desistir(&criada.id).await.err(),
+        outro.responder(&criada.id, Default::default()).await.err(),
+    ] {
+        assert!(
+            matches!(falha, Some(FalhaDaApi::Http(ref status)) if status.starts_with("404")),
+            "{falha:?}"
+        );
+    }
+    assert_eq!(
+        dono.consultar(&criada.id, None).await.unwrap().id,
+        criada.id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tres_pins_errados_bloqueiam_ate_o_administrador() {
+    let servidor = subir_com_tokens("api-bloqueio", &["Falso"]).await;
+    let (mut cliente, _, pareado) = sistema(&servidor, "sistema").await;
+
+    for restantes in [2, 1] {
+        let errado = cliente.assinar(&pedido("0000", "Falso", 1)).await;
+        assert_eq!(recusa(errado).2, Some(restantes));
+    }
+    let bloqueou = cliente.assinar(&pedido("0000", "Falso", 1)).await;
+    assert_eq!(recusa(bloqueou), (423, TipoDeFalha::Bloqueado, None));
+
+    // Bloqueado, nem ler nem o PIN certo passam.
+    assert_eq!(recusa(cliente.chaves().await).1, TipoDeFalha::Bloqueado);
+    let certo = cliente.assinar(&pedido("2468", "Falso", 1)).await;
+    assert_eq!(recusa(certo).1, TipoDeFalha::Bloqueado);
+
+    let dispositivo: IdDoDispositivo = pareado.dispositivo.to_string().parse().unwrap();
+    assert!(travar(&servidor.banco).desbloquear(dispositivo).unwrap());
+    assert!(cliente.assinar(&pedido("2468", "Falso", 1)).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_revogado_cai_na_conexao_aberta_e_no_handshake() {
+    let servidor = subir("api-revogado").await;
+    let (mut cliente, identidade, pareado) = sistema(&servidor, "sistema").await;
+    assert!(cliente.chaves().await.is_ok());
+
+    let dispositivo: IdDoDispositivo = pareado.dispositivo.to_string().parse().unwrap();
+    assert!(travar(&servidor.banco).revogar(dispositivo).unwrap());
+
+    let aberta = cliente.chaves().await;
+    assert!(
+        matches!(aberta, Err(FalhaDaApi::Http(ref status)) if status.starts_with("403")),
+        "{aberta:?}"
+    );
+    let nova = Cliente::abrir(&servidor.endereco, &identidade, pareado.servidor).await;
+    let nova = match nova {
+        Ok(mut cliente) => cliente.chaves().await.err(),
+        Err(falha) => Some(falha),
+    };
+    assert!(matches!(nova, Some(FalhaDaApi::Recusado)), "{nova:?}");
 }
