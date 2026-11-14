@@ -7,7 +7,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::c_void;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cryptoki_sys::*;
 use ipc::{DaFace, DoAgente, TipoDeFalha};
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::objetos::Objeto;
 use crate::slots::{self, Slot};
-use crate::{MODULO, Modulo, Operacao, SituacaoDoPin, canal, entrada, registro, trava};
+use crate::{Login, MODULO, Modulo, Operacao, SituacaoDoPin, canal, entrada, registro, trava};
 
 /// O que a especificação põe em `ulValueLen` quando o atributo não existe, e
 /// nos campos de `CK_TOKEN_INFO` que o token não sabe.
@@ -626,8 +626,12 @@ pub(crate) unsafe extern "C" fn C_Login(
         let mut guarda = trava(&MODULO);
         let modulo = modulo!(guarda);
         match resposta {
-            Ok((DoAgente::Entrou {}, geracao)) => {
-                modulo.login = Some(geracao);
+            Ok((DoAgente::Entrou { sessao }, geracao)) => {
+                modulo.login = Some(Login {
+                    geracao,
+                    prazo: sessao.map(Duration::from_secs),
+                    uso: Instant::now(),
+                });
                 modulo.pin = SituacaoDoPin::Normal;
                 CKR_OK
             }
@@ -905,6 +909,7 @@ unsafe fn assinar_e_entregar(
     let Some(mecanismo) = slots::do_contrato(operacao.mecanismo) else {
         return CKR_MECHANISM_INVALID;
     };
+    let inicio = Instant::now();
     let resposta = canal::pedir(&DaFace::Assinar {
         token,
         chave,
@@ -913,6 +918,9 @@ unsafe fn assinar_e_entregar(
     });
     match resposta {
         Ok((DoAgente::Assinatura { assinatura }, _)) => {
+            if let Some(modulo) = trava(&MODULO).as_mut() {
+                modulo.usou(inicio);
+            }
             entregar(&assinatura, bytes, pSignature, pulSignatureLen)
         }
         Ok((DoAgente::Falha { erro }, _)) => {

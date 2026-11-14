@@ -149,8 +149,24 @@ pub struct Estado {
     pub banco: Arc<Mutex<Banco>>,
     pub tokens: Tokens,
     pub eventos: broadcast::Sender<Evento>,
+    pub ajustes: Ajustes,
     assinaturas: Assinaturas,
     conferencias: Semaphore,
+}
+
+/// O que quem opera pode ajustar no serviço.
+#[derive(Debug, Clone, Copy)]
+pub struct Ajustes {
+    /// Quanto o login do PIN pessoal de um agente dura sem uso.
+    pub prazo_da_sessao: Duration,
+}
+
+impl Default for Ajustes {
+    fn default() -> Ajustes {
+        Ajustes {
+            prazo_da_sessao: agente::PRAZO_DA_SESSAO,
+        }
+    }
 }
 
 impl Estado {
@@ -159,12 +175,21 @@ impl Estado {
         banco: Arc<Mutex<Banco>>,
         drivers: &Path,
     ) -> Result<Arc<Estado>, FalhaDoServico> {
+        Estado::iniciar_com(banco, drivers, Ajustes::default())
+    }
+
+    pub fn iniciar_com(
+        banco: Arc<Mutex<Banco>>,
+        drivers: &Path,
+        ajustes: Ajustes,
+    ) -> Result<Arc<Estado>, FalhaDoServico> {
         let (eventos, _) = broadcast::channel(EVENTOS_NA_FILA);
         let tokens = Tokens::iniciar(&banco, drivers, &eventos)?;
         Ok(Arc::new(Estado {
             banco,
             tokens,
             eventos,
+            ajustes,
             assinaturas: Assinaturas::default(),
             conferencias: Semaphore::new(CONFERENCIAS_SIMULTANEAS),
         }))

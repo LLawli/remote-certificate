@@ -18,7 +18,7 @@ use rede::pareamento::{self, CodigoDePareamento, FalhaDoPareamento, Pareado};
 use rede::tls::{self, Fixacao, Identidade};
 use servidor::banco::{Banco, ChaveDoBanco, IdDoDispositivo, IdDoUsuario, ler_chave, travar};
 use servidor::pin;
-use servidor::servico::{self, Estado, agora};
+use servidor::servico::{self, Ajustes, Estado, agora};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use zeroize::Zeroizing;
@@ -44,6 +44,10 @@ async fn subir(nome: &str) -> Servidor {
 /// Com tokens no banco cujo driver não existe: a assinatura chega ao token e
 /// falha lá.
 async fn subir_com_tokens(nome: &str, tokens: &[&str]) -> Servidor {
+    subir_com(nome, tokens, Ajustes::default()).await
+}
+
+async fn subir_com(nome: &str, tokens: &[&str], ajustes: Ajustes) -> Servidor {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rede-{nome}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -61,7 +65,7 @@ async fn subir_com_tokens(nome: &str, tokens: &[&str]) -> Servidor {
     let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endereco = ouvinte.local_addr().unwrap().to_string();
     // Nenhum driver sobe: não há nenhum em /sem-drivers.
-    let estado = Estado::iniciar(banco.clone(), Path::new("/sem-drivers")).unwrap();
+    let estado = Estado::iniciar_com(banco.clone(), Path::new("/sem-drivers"), ajustes).unwrap();
     tokio::spawn(servico::servir(ouvinte, estado));
     Servidor {
         endereco,
@@ -350,7 +354,10 @@ async fn sem_o_pin_pessoal_nao_assina() {
     // Com o PIN, passa da autenticação e chega ao token.
     assert_eq!(
         pedir_ao_servidor(&mut conexao, entrar("2468")).await,
-        DoServidor::Entrou { id: 1 }
+        DoServidor::Entrou {
+            id: 1,
+            sessao: Some(900)
+        }
     );
     let resposta = pedir_ao_servidor(&mut conexao, assinar(4, "RemoteID")).await;
     assert_eq!(
@@ -364,6 +371,42 @@ async fn sem_o_pin_pessoal_nao_assina() {
         DoServidor::Saiu { id: 5 }
     );
     let resposta = pedir_ao_servidor(&mut conexao, assinar(6, "RemoteID")).await;
+    assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::NaoAutenticado));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sessao_do_pin_vence_sem_uso_e_o_uso_a_renova() {
+    let ajustes = Ajustes {
+        prazo_da_sessao: std::time::Duration::from_millis(1500),
+    };
+    let servidor = subir_com("agente-sessao", &[], ajustes).await;
+    let (mut conexao, _, _) = agente(&servidor).await;
+    assert_eq!(
+        pedir_ao_servidor(&mut conexao, entrar("2468")).await,
+        DoServidor::Entrou {
+            id: 1,
+            sessao: Some(1)
+        }
+    );
+
+    // Usada antes do prazo, a sessão continua (o token é que não existe).
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(2, "RemoteID")).await;
+    assert_eq!(
+        tipo_da_falha(&resposta),
+        Some(TipoDeFalha::TokenDesconhecido)
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(3, "RemoteID")).await;
+    assert_eq!(
+        tipo_da_falha(&resposta),
+        Some(TipoDeFalha::TokenDesconhecido),
+        "o uso renovou a sessão"
+    );
+
+    // Sem uso por mais que o prazo, volta a pedir o PIN.
+    tokio::time::sleep(std::time::Duration::from_millis(1700)).await;
+    let resposta = pedir_ao_servidor(&mut conexao, assinar(4, "RemoteID")).await;
     assert_eq!(tipo_da_falha(&resposta), Some(TipoDeFalha::NaoAutenticado));
 }
 
@@ -402,7 +445,10 @@ async fn tres_pins_errados_bloqueiam_e_avisam_as_outras_conexoes() {
     assert!(travar(&servidor.banco).desbloquear(dispositivo).unwrap());
     assert_eq!(
         pedir_ao_servidor(&mut conexao, entrar("2468")).await,
-        DoServidor::Entrou { id: 1 }
+        DoServidor::Entrou {
+            id: 1,
+            sessao: Some(900)
+        }
     );
 }
 

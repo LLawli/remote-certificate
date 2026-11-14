@@ -22,8 +22,8 @@ use crate::servico::{BLOQUEADO, Estado};
 use crate::token::FalhaDoToken;
 use crate::tokens::{Evento, FalhaDaOperacao, erro};
 
-/// Quanto o login do PIN pessoal dura sem uso. Provisório: a medir na VM como
-/// os assinadores reagem a pedir o PIN de novo.
+/// Quanto o login do PIN pessoal dura sem uso, se quem opera não mudar
+/// (`servir --sessao`).
 pub const PRAZO_DA_SESSAO: Duration = Duration::from_secs(15 * 60);
 /// Quanto o token espera a pessoa responder um fator (o OTP).
 pub const PRAZO_DA_PESSOA: Duration = Duration::from_secs(3 * 60);
@@ -172,7 +172,7 @@ impl Sessao {
         if self
             .entrada
             .as_ref()
-            .is_some_and(|(_, uso)| uso.elapsed() > PRAZO_DA_SESSAO)
+            .is_some_and(|(_, uso)| uso.elapsed() > self.estado.ajustes.prazo_da_sessao)
         {
             self.entrada = None;
         }
@@ -227,7 +227,10 @@ impl Sessao {
         match self.estado.conferir_pin(self.dispositivo, pin).await {
             Ok(autenticado) => {
                 self.entrada = Some((autenticado, Instant::now()));
-                DoServidor::Entrou { id }
+                DoServidor::Entrou {
+                    id,
+                    sessao: Some(self.estado.ajustes.prazo_da_sessao.as_secs()),
+                }
             }
             Err(erro) => {
                 self.entrada = None;

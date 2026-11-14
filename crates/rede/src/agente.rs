@@ -68,6 +68,10 @@ pub enum DoAgente {
 pub enum DoServidor {
     Entrou {
         id: u64,
+        /// Quanto o login dura sem uso, em segundos. Cada assinatura renova.
+        /// Com ele, a face sabe que o login venceu antes de tentar assinar.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sessao: Option<u64>,
     },
     Chaves {
         id: u64,

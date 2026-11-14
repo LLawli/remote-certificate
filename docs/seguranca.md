@@ -106,7 +106,9 @@ SQLCipher, configurado em toda conexão antes de qualquer consulta:
   `dispositivo revogar`. A conexão aberta de um dispositivo revogado cai na
   mensagem seguinte.
 - No WebSocket do agente, uma mensagem tem no máximo 4 MiB, e o servidor
-  espera a pessoa responder um fator por 3 minutos antes de cancelar.
+  espera a pessoa responder um fator por 3 minutos antes de cancelar. O maior
+  bloco medido nos programas de verdade foi de 254 bytes (os atributos
+  assinados de um PDF no Papers); TLS manda 51.
 - Na API HTTP, o PIN pessoal vai em cada assinatura (um lote conta como uma)
   e não abre sessão: nenhum identificador de sessão circula para ser roubado,
   e quem chega ao computador do sistema depois não assina sem o PIN. O corpo
@@ -175,9 +177,13 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
   guarda o PIN depois do `C_Login`, não escreve nada no stdout nem no stderr,
   e o registro dela leva só a função, o resultado, o tamanho e o começo do
   SHA-256 dos dados, nunca o PIN nem o documento.
-- **Sessão que expira**: depois de um tempo sem uso, o servidor esquece o login
-  do PIN pessoal e a próxima operação pede o PIN de novo. A medir na VM: como
-  Firefox, PJeOffice e Serpro reagem a `CKR_USER_NOT_LOGGED_IN` no meio do uso.
+- **Sessão que expira**: depois de 15 minutos sem uso (`servir --sessao`), o
+  servidor esquece o login do PIN pessoal. O prazo vai junto da resposta do
+  login, e a face se dá por deslogada um pouco antes (um décimo do prazo, até
+  30 s), renovando a cada assinatura como o servidor. Assim o NSS vê a sessão
+  pública e pede o PIN antes de assinar. Sem isso, medido no Firefox: a
+  recusa só aparecia no `C_Sign`, no meio do handshake, e a página ficava
+  carregando sem pedir o PIN.
 
 ## O que ficou de fora
 

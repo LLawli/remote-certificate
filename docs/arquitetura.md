@@ -176,8 +176,10 @@ O agente fala com o servidor por um WebSocket em `/v1/agente`, sobre o mTLS
 do dispositivo, com uma mensagem JSON por quadro (`rede::agente`):
 
 - `entrar` com o PIN pessoal abre a sessão para assinar; ela vence depois de
-  15 minutos sem uso (provisório, a medir na VM) ou com `sair`. `listar` não
-  pede o PIN, como um token físico mostra os certificados antes do login.
+  15 minutos sem uso (`servir --sessao <segundos>`) ou com `sair`. A resposta
+  `entrou` leva o prazo, para a face saber que o login venceu sem precisar
+  tentar assinar. `listar` não pede o PIN, como um token físico mostra os
+  certificados antes do login.
 - `assinar` pode receber, no meio, um `pedido_de_fatores` (o OTP, com a recusa
   quando pede de novo), que o agente responde com `fatores` ou `desistir`, no
   mesmo `id`. Uma operação por conexão de cada vez.

@@ -221,7 +221,7 @@ impl Sessao {
                         .collect(),
                 }
             }
-            remoto::DoServidor::Entrou { .. } => DoAgente::Entrou {},
+            remoto::DoServidor::Entrou { sessao, .. } => DoAgente::Entrou { sessao },
             remoto::DoServidor::Saiu { .. } => DoAgente::Saiu {},
             remoto::DoServidor::Assinatura { assinatura, .. } => {
                 DoAgente::Assinatura { assinatura }
@@ -254,7 +254,7 @@ fn definir_id(mensagem: &mut remoto::DoAgente, novo: u64) {
 
 fn id_da_resposta(resposta: &remoto::DoServidor) -> Option<u64> {
     match resposta {
-        remoto::DoServidor::Entrou { id }
+        remoto::DoServidor::Entrou { id, .. }
         | remoto::DoServidor::Chaves { id, .. }
         | remoto::DoServidor::PedidoDeFatores { id, .. }
         | remoto::DoServidor::Assinatura { id, .. }

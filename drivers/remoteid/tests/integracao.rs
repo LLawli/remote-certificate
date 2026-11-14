@@ -599,7 +599,13 @@ fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
             .enviar(&DoAgente::Entrar { id: 2, pin })
             .await
             .unwrap();
-        assert_eq!(resposta(&mut conexao).await, DoServidor::Entrou { id: 2 });
+        assert_eq!(
+            resposta(&mut conexao).await,
+            DoServidor::Entrou {
+                id: 2,
+                sessao: Some(900)
+            }
+        );
 
         let assinar = |id| DoAgente::Assinar {
             id,
@@ -1003,7 +1009,7 @@ fn a_estacao_assina_pelo_agente_com_o_pin_pessoal_e_a_janela_do_otp() {
     );
     assert_eq!(
         firefox.pedir(&entrar(PIN_PESSOAL)).unwrap(),
-        ipc::DoAgente::Entrou {}
+        ipc::DoAgente::Entrou { sessao: Some(900) }
     );
 
     // A janela pergunta o OTP; o código errado volta para ela com a recusa.

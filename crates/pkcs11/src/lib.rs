@@ -33,7 +33,7 @@ mod stubs;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cryptoki_sys::*;
 
@@ -54,12 +54,39 @@ struct Modulo {
     listado: Option<Instant>,
     sessoes: HashMap<CK_SESSION_HANDLE, Sessao>,
     proximo_handle: CK_SESSION_HANDLE,
-    /// A geração da conexão com o agente em que o `C_Login` deu certo. O
-    /// login vale para a aplicação inteira, não para uma sessão, e acaba se a
-    /// conexão com o agente cair.
-    login: Option<u64>,
+    /// O login vale para a aplicação inteira, não para uma sessão.
+    login: Option<Login>,
     /// O que o último `C_Login` errado disse, para os flags do token.
     pin: SituacaoDoPin,
+}
+
+/// O `C_Login` que deu certo.
+///
+/// Ele acaba se a conexão com o agente cair (outra geração) ou se passar o
+/// prazo que o servidor deu sem uso. O módulo precisa saber disso sozinho: o
+/// NSS decide se pede o PIN pelo estado da sessão (`C_GetSessionInfo`), e um
+/// login que o servidor já esqueceu, ainda dado como vivo aqui, só aparece na
+/// recusa do `C_Sign`, no meio do handshake. Medido no Firefox: a página fica
+/// carregando, sem pedir o PIN.
+#[derive(Clone, Copy)]
+struct Login {
+    geracao: u64,
+    /// O prazo do servidor; `None` com um agente que não o informa.
+    prazo: Option<Duration>,
+    /// Quando o login foi usado pela última vez, do jeito que o servidor
+    /// conta: o começo de cada assinatura.
+    uso: Instant,
+}
+
+impl Login {
+    /// Antes do servidor, com folga: um décimo do prazo, até 30 s.
+    fn vale(&self, geracao: u64, agora: Instant) -> bool {
+        let folga = |prazo: Duration| (prazo / 10).min(Duration::from_secs(30));
+        self.geracao == geracao
+            && self.prazo.is_none_or(|prazo| {
+                agora.saturating_duration_since(self.uso) + folga(prazo) < prazo
+            })
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -104,7 +131,16 @@ impl Modulo {
     }
 
     fn logado(&self) -> bool {
-        self.login == Some(canal::geracao())
+        self.login
+            .is_some_and(|l| l.vale(canal::geracao(), Instant::now()))
+    }
+
+    /// Uma assinatura que começou em `inicio` deu certo: o servidor renovou o
+    /// login naquela hora.
+    fn usou(&mut self, inicio: Instant) {
+        if let Some(login) = self.login.as_mut() {
+            login.uso = login.uso.max(inicio);
+        }
     }
 
     fn slot(&self, id: CK_SLOT_ID) -> Option<&Slot> {
@@ -257,6 +293,35 @@ pub unsafe extern "C" fn C_GetFunctionList(ppFunctionList: *mut *mut CK_FUNCTION
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn o_login_vence_antes_do_servidor_e_cai_com_a_conexao() {
+        let inicio = Instant::now();
+        let login = Login {
+            geracao: 3,
+            prazo: Some(Duration::from_secs(900)),
+            uso: inicio,
+        };
+        let em = |segundos| inicio + Duration::from_secs(segundos);
+        assert!(login.vale(3, em(0)));
+        assert!(login.vale(3, em(869)));
+        // 30 s de folga num prazo de 15 min.
+        assert!(!login.vale(3, em(870)));
+        assert!(!login.vale(4, em(0)), "outra conexão com o agente");
+        // Num prazo curto, a folga é um décimo.
+        let curto = Login {
+            prazo: Some(Duration::from_secs(60)),
+            ..login
+        };
+        assert!(curto.vale(3, em(53)));
+        assert!(!curto.vale(3, em(54)));
+        // Sem prazo informado, só a conexão conta.
+        let sem_prazo = Login {
+            prazo: None,
+            ..login
+        };
+        assert!(sem_prazo.vale(3, em(100_000)));
+    }
 
     #[test]
     fn a_tabela_nao_tem_ponteiro_nulo() {

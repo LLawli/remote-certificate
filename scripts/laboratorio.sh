@@ -22,6 +22,8 @@ cd "$(dirname "$0")/.."
 PORTA=${PORTA:-18443}
 # Onde o servidor escuta.
 ESCUTA=${ESCUTA:-127.0.0.1}
+# Quanto o login do PIN pessoal dura sem uso, em segundos (o padrão é 15 min).
+SESSAO=${SESSAO:-900}
 PIN_PESSOAL=${PIN_PESSOAL:-pessoal-2468}
 # Os dados de teste do servidor falso do RemoteID-linux.
 EMAIL=teste@remoteid.local
@@ -67,7 +69,7 @@ servidor token criar RemoteID remote-certificate-driver-remoteid "${banco[@]}" -
 printf '%s\n%s\n' "$EMAIL" "$SENHA" |
     servidor token configurar RemoteID --drivers "$alvo" "${banco[@]}" >&2
 echo "$PIN_PESSOAL" | servidor usuario criar maria "${banco[@]}" >&2
-servidor servir --endereco "$ESCUTA:$PORTA" --drivers "$alvo" "${banco[@]}" \
+servidor servir --endereco "$ESCUTA:$PORTA" --sessao "$SESSAO" --drivers "$alvo" "${banco[@]}" \
     2>"$lab/servidor.log" &
 filhos+=($!)
 for _ in $(seq 50); do grep -q atendendo "$lab/servidor.log" && break; sleep 0.1; done

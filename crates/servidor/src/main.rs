@@ -17,7 +17,7 @@ use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_ch
 use servidor::driver::{Conversa, Driver};
 use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
 use servidor::recuperacao::{self, CodigoInvalido};
-use servidor::servico::{self, ENDERECO_PADRAO, Estado, VALIDADE_DO_PAREAMENTO};
+use servidor::servico::{self, Ajustes, ENDERECO_PADRAO, Estado, VALIDADE_DO_PAREAMENTO};
 use servidor::token::{GuardaNoBanco, Token};
 use servidor::tokens::DRIVERS_PADRAO;
 use time::OffsetDateTime;
@@ -29,6 +29,8 @@ uso: remote-certificate <comando>
 
   versao
   servir [--endereco <ip:porta>] [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
+         [--sessao <segundos>]
+                     --sessao: quanto o login do PIN pessoal dura sem uso (900)
   token criar <nome> <driver> [--banco <arquivo>] [--chave <arquivo>] [-- <argumentos do driver>]
   token configurar <nome>  [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
                      pergunta o que o driver pede (os segredos sem eco)
@@ -121,9 +123,22 @@ fn abrir(resto: &[&str]) -> Result<Banco, String> {
 fn servir(resto: &[&str]) -> Result<(), String> {
     let endereco = opcao(resto, "--endereco", ENDERECO_PADRAO)?;
     let drivers = Path::new(opcao(resto, "--drivers", DRIVERS_PADRAO)?);
+    let padrao = Ajustes::default();
+    let sessao = opcao(
+        resto,
+        "--sessao",
+        &padrao.prazo_da_sessao.as_secs().to_string(),
+    )?
+    .parse::<u64>()
+    .ok()
+    .filter(|s| *s > 0)
+    .ok_or("--sessao é um número de segundos maior que zero")?;
+    let ajustes = Ajustes {
+        prazo_da_sessao: std::time::Duration::from_secs(sessao),
+    };
     let banco = Arc::new(Mutex::new(abrir(resto)?));
     let execucao = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    let estado = Estado::iniciar(banco, drivers).map_err(|e| e.to_string())?;
+    let estado = Estado::iniciar_com(banco, drivers, ajustes).map_err(|e| e.to_string())?;
     execucao.block_on(async {
         let ouvinte = tokio::net::TcpListener::bind(endereco)
             .await

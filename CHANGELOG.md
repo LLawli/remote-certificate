@@ -83,6 +83,10 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - O módulo, dentro de um Flatpak (o Tessera), procura o agente no diretório
   de execução do app, `$XDG_RUNTIME_DIR/app/$FLATPAK_ID`. Testado no Tessera
   0.4.3.
+- `remote-certificate servir --sessao <segundos>`: quanto o login do PIN
+  pessoal dura sem uso (15 minutos, se não mudar).
+- O módulo da estação sabe o prazo do login e o dá por vencido antes do
+  servidor: o Firefox pede o PIN de novo, em vez de travar na página.
 - Um mecanismo que o token não tem (o RSA-PSS do TLS 1.3) volta
   `CKR_MECHANISM_INVALID` mesmo com parâmetros, e não
   `CKR_MECHANISM_PARAM_INVALID`.

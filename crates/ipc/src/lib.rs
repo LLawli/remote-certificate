@@ -77,7 +77,11 @@ pub enum DoAgente {
     Chaves {
         chaves: Vec<ChaveDoToken>,
     },
-    Entrou {},
+    Entrou {
+        /// Quanto o login dura sem uso, em segundos; cada assinatura renova.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sessao: Option<u64>,
+    },
     Saiu {},
     Assinatura {
         #[serde(with = "protocolo::b64")]
