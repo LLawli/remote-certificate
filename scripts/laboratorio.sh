@@ -5,6 +5,13 @@
 # reais (pkcs11-tool, p11tool, Firefox) e é a base das VMs da estação.
 #
 #   scripts/laboratorio.sh            # sobe tudo e espera o Ctrl+C
+#   SO_SERVIDOR=1 scripts/laboratorio.sh
+#                                     # só o servidor, para a estação de uma VM;
+#                                     # target/laboratorio/parear dá um código
+#
+# Para uma VM, um túnel reverso (`ssh -N -R 18443:127.0.0.1:18443 <vm>`) leva
+# a porta ao 127.0.0.1 de dentro dela sem abrir o firewall do host. ESCUTA
+# muda o endereço quando a estação está em outra máquina da rede.
 #
 # Em outro terminal, `source target/laboratorio/ambiente` e use o módulo em
 # $MODULO. O PIN pessoal é $PIN_PESSOAL; a janela do OTP responde sozinha o
@@ -13,6 +20,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PORTA=${PORTA:-18443}
+# Onde o servidor escuta.
+ESCUTA=${ESCUTA:-127.0.0.1}
 PIN_PESSOAL=${PIN_PESSOAL:-pessoal-2468}
 # Os dados de teste do servidor falso do RemoteID-linux.
 EMAIL=teste@remoteid.local
@@ -58,10 +67,23 @@ servidor token criar RemoteID remote-certificate-driver-remoteid "${banco[@]}" -
 printf '%s\n%s\n' "$EMAIL" "$SENHA" |
     servidor token configurar RemoteID --drivers "$alvo" "${banco[@]}" >&2
 echo "$PIN_PESSOAL" | servidor usuario criar maria "${banco[@]}" >&2
-servidor servir --endereco "127.0.0.1:$PORTA" --drivers "$alvo" "${banco[@]}" \
+servidor servir --endereco "$ESCUTA:$PORTA" --drivers "$alvo" "${banco[@]}" \
     2>"$lab/servidor.log" &
 filhos+=($!)
 for _ in $(seq 50); do grep -q atendendo "$lab/servidor.log" && break; sleep 0.1; done
+
+# Um código de pareamento novo a cada chamada, para a estação de outra máquina.
+cat >"$lab/parear" <<EOF
+#!/bin/sh
+exec "$alvo/remote-certificate" dispositivo parear maria "\${1:-estacao}" \\
+    --banco "$lab/banco.db" --chave "$lab/chave"
+EOF
+chmod 700 "$lab/parear"
+if [[ -n ${SO_SERVIDOR:-} ]]; then
+    echo "servidor pronto em $ESCUTA:$PORTA; código: $lab/parear (Ctrl+C encerra)" >&2
+    wait
+    exit 0
+fi
 
 # A janela do OTP do laboratório: responde o código do servidor falso.
 cat >"$lab/janela" <<EOF
@@ -77,7 +99,7 @@ export REMOTE_CERTIFICATE_AGENTE=$lab/execucao/agente.sock
 export REMOTE_CERTIFICATE_DIALOGO=$lab/janela
 export REMOTE_CERTIFICATE_REGISTRO=$lab/registro
 servidor dispositivo parear maria laboratorio "${banco[@]}" 2>/dev/null |
-    "$alvo/remote-certificate-agente" parear "127.0.0.1:$PORTA" >&2
+    "$alvo/remote-certificate-agente" parear "$ESCUTA:$PORTA" >&2
 "$alvo/remote-certificate-agente" servir 2>"$lab/agente.log" &
 filhos+=($!)
 for _ in $(seq 50); do [[ -S $REMOTE_CERTIFICATE_AGENTE ]] && break; sleep 0.1; done

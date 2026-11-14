@@ -68,7 +68,15 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   `pkcs11-tool`, o `p11tool` e pelo `p11-kit-proxy`.
 - `remote-certificate-dialogo`, a janela do OTP no Linux.
 - `scripts/laboratorio.sh`: um servidor e uma estação inteiros nesta máquina,
-  para testar o módulo com programas de verdade.
+  para testar o módulo com programas de verdade. Com `SO_SERVIDOR=1`, só o
+  servidor, para parear a estação de uma VM.
+- O pacote da estação (`estacao/`): compilado no Ubuntu 24.04, com um
+  `instalar.sh` por usuário, sem root, que registra o módulo no p11-kit do
+  usuário e sobe o agente como serviço do systemd do usuário. No Fedora 44,
+  Firefox, Chromium e Papers usam o token só com isso.
+- O cliente (agente, pareamento e API) desiste de conectar depois de 10 s, em
+  vez de esperar para sempre um servidor atrás de um firewall que descarta os
+  pacotes.
 - API HTTP `/v1` para sistemas integrados: `GET /v1/chaves` e a assinatura
   como recurso em `/v1/assinaturas`, com um lote de até 1000 documentos por
   PIN pessoal, o pedido do OTP no meio, a desistência e a consulta que espera

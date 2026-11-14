@@ -153,6 +153,15 @@ A janela do OTP no Linux é `crates/janela` (`remote-certificate-dialogo`), GTK 
 com libadwaita: um campo por fator pedido, a recusa num banner, e fechar ou
 Esc é desistir. Sem `application_id`, para abrir também dentro de um sandbox.
 
+A estação é instalada pelo pacote de `estacao/` (`docker build -f
+estacao/Dockerfile --output target/estacao .`), compilado no Ubuntu 24.04
+para que a glibc, o GTK e a libadwaita sejam os mais antigos aceitos. O
+`instalar.sh` dele roda como o usuário, sem root: põe o agente, a janela e o
+módulo em `~/.local`, registra o módulo em `~/.config/pkcs11/modules` e liga a
+unit `remote-certificate-agente.service` do systemd do usuário, presa à sessão
+gráfica, que só sobe depois do pareamento. Onde o NSS lê os módulos do p11-kit
+(Fedora), Firefox, Chromium e Papers usam o token sem mais nada.
+
 `scripts/laboratorio.sh` sobe nesta máquina, pelas CLIs de verdade, o servidor
 falso do RemoteID, o servidor com o driver e o agente pareado, e deixa o módulo
 pronto para `pkcs11-tool`, `p11tool` ou um navegador.

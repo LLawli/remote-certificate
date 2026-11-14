@@ -1,0 +1,24 @@
+# O agente da estação, por usuário. O instalar.sh troca @BIN@ pelo diretório
+# dos executáveis.
+[Unit]
+Description=remote-certificate: agente da estação
+Documentation=https://github.com/LLawli/remote-certificate
+# A janela do OTP precisa da sessão gráfica.
+PartOf=graphical-session.target
+After=graphical-session.target
+# Sem pareamento, não há o que servir.
+ConditionPathExists=%h/.local/share/remote-certificate/dispositivo.json
+
+[Service]
+ExecStart=@BIN@/remote-certificate-agente servir
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=graphical-session.target

@@ -9,6 +9,7 @@
 use std::fmt;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use data_encoding::BASE32_NOPAD;
@@ -145,6 +146,10 @@ impl fmt::Display for FalhaDoPareamento {
     }
 }
 
+/// Quanto o cliente espera a conexão e o handshake. Um firewall que descarta
+/// os pacotes, sem recusar, deixaria a espera para sempre.
+pub const PRAZO_DA_CONEXAO: Duration = Duration::from_secs(10);
+
 /// Uma conexão mTLS com o servidor em `endereco` (`host:porta`).
 pub async fn conectar(
     endereco: &str,
@@ -152,12 +157,23 @@ pub async fn conectar(
     fixacao: Fixacao,
 ) -> Result<TlsStream<TcpStream>, FalhaDoPareamento> {
     let config = config_do_cliente(identidade, fixacao).map_err(FalhaDoPareamento::Tls)?;
-    let tcp = TcpStream::connect(endereco)
+    let sem_resposta = || {
+        FalhaDoPareamento::Conexao(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "{endereco} não respondeu em {} s",
+                PRAZO_DA_CONEXAO.as_secs()
+            ),
+        ))
+    };
+    let tcp = tokio::time::timeout(PRAZO_DA_CONEXAO, TcpStream::connect(endereco))
         .await
+        .map_err(|_| sem_resposta())?
         .map_err(FalhaDoPareamento::Conexao)?;
-    TlsConnector::from(Arc::new(config))
-        .connect(nome_do_servidor(), tcp)
+    let handshake = TlsConnector::from(Arc::new(config)).connect(nome_do_servidor(), tcp);
+    tokio::time::timeout(PRAZO_DA_CONEXAO, handshake)
         .await
+        .map_err(|_| sem_resposta())?
         .map_err(|e| {
             if e_chave_recusada(&e) {
                 FalhaDoPareamento::ServidorDiferente
@@ -231,6 +247,21 @@ pub async fn parear(
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn servidor_mudo_vence_o_prazo_em_vez_de_esperar_para_sempre() {
+        // Aceita o TCP (o backlog do kernel) e nunca responde o TLS.
+        let mudo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endereco = mudo.local_addr().unwrap().to_string();
+        let identidade = Identidade::gerar().unwrap();
+        let Err(falha) = conectar(&endereco, &identidade, Fixacao::Completa([0; 32])).await else {
+            panic!("conectou num servidor mudo");
+        };
+        assert!(
+            matches!(&falha, FalhaDoPareamento::Conexao(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{falha:?}"
+        );
+    }
 
     #[test]
     fn o_codigo_volta_com_a_impressao_e_o_segredo() {
