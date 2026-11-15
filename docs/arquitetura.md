@@ -315,12 +315,14 @@ o resultado. PIN, OTP, senha e documento nunca entram, nem em log.
 - Imagem final com glibc (Debian slim), porque os módulos PKCS#11 dos
   fornecedores de token físico são compilados para glibc. Roda como usuário não
   root.
-- Estado em `/dados` (volume): o banco SQLCipher. A chave dele, num secret do
-  Docker.
+- Estado em `/dados` (volume): o banco SQLCipher e, em `/dados/drivers/<id>`,
+  o diretório de estado de cada token. A chave do banco, num secret do Docker.
 - A imagem base não traz driver nenhum. Cada driver aceito tem um Dockerfile em
   `drivers/<nome>/` que gera uma imagem derivada da base com o driver e o que
-  ele precisa (`FROM ... COPY ... /drivers/`). Quem tem dois tipos de token
-  junta os dois numa imagem sua.
+  ele precisa (`FROM ... COPY ... /drivers/`), com o manifesto do lançador
+  ([drivers.md](drivers.md#manifesto)). Quem tem dois tipos de token junta os
+  dois: o `bin/deploy` encadeia os Dockerfiles dos drivers de `DRIVERS`, um
+  sobre o outro.
 - Token físico plugado no servidor: pelo `pcscd` do host com o socket
   `/run/pcscd` montado no container, ou pelo dispositivo USB passado ao
   container. A escolha depende de medir com um token real.
@@ -334,6 +336,12 @@ real. O driver é um adaptador sobre o `remoteid servir` (JSON por linha no
 stdio), que ele roda como processo filho; o `remoteid` estático do pacote de
 servidor daquele projeto é instalado junto do driver. Não é uma dependência de
 crate: o servidor não carrega o RemoteID.
+
+- **Imagem**: `drivers/remoteid/Dockerfile` põe em `/drivers` o driver, o
+  `remoteid` 0.5.2 da release do RemoteID-linux (conferido pelo SHA-256) e o
+  manifesto (a 443). O token:
+  `remote-certificate token criar <nome> remote-certificate-driver-remoteid`;
+  o estado do `remoteid` fica no diretório de estado do token.
 
 - **Configuração**: o administrador dá e-mail e senha. O driver entra na conta
   com um PIN local que ele mesmo gera (sem chaveiro no container, esse PIN

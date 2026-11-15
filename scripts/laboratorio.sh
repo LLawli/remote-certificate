@@ -43,7 +43,7 @@ done
 
 lab=$PWD/target/laboratorio
 rm -rf "$lab"
-mkdir -p "$lab/estado" "$lab/execucao"
+mkdir -p "$lab/drivers" "$lab/execucao"
 chmod 700 "$lab/execucao"
 
 filhos=()
@@ -63,13 +63,20 @@ test -n "$mock" || { echo "o servidor falso não subiu" >&2; exit 1; }
 banco=(--banco "$lab/banco.db" --chave "$lab/chave")
 head -c 32 /dev/urandom >"$lab/chave"
 chmod 600 "$lab/chave"
+# Os drivers como a imagem os instala: o driver, o `remoteid` na mesma pasta e
+# o manifesto, aqui com a porta do servidor falso. O servidor os sobe isolados.
+cp "$alvo/remote-certificate-driver-remoteid" "$REMOTEID_BIN" "$lab/drivers/"
+porta_do_mock=${mock##*:}
+printf '{"tcp": [%s]}\n' "${porta_do_mock%%/*}" \
+    >"$lab/drivers/remote-certificate-driver-remoteid.manifesto.json"
+drivers=(--drivers "$lab/drivers" --estados "$lab/estados")
 servidor() { "$alvo/remote-certificate" "$@"; }
 servidor token criar RemoteID remote-certificate-driver-remoteid "${banco[@]}" -- \
-    --estado "$lab/estado" --remoteid "$REMOTEID_BIN" --servidor "$mock" >&2
+    --servidor "$mock" >&2
 printf '%s\n%s\n' "$EMAIL" "$SENHA" |
-    servidor token configurar RemoteID --drivers "$alvo" "${banco[@]}" >&2
+    servidor token configurar RemoteID "${drivers[@]}" "${banco[@]}" >&2
 echo "$PIN_PESSOAL" | servidor usuario criar maria "${banco[@]}" >&2
-servidor servir --endereco "$ESCUTA:$PORTA" --sessao "$SESSAO" --drivers "$alvo" "${banco[@]}" \
+servidor servir --endereco "$ESCUTA:$PORTA" --sessao "$SESSAO" "${drivers[@]}" "${banco[@]}" \
     2>"$lab/servidor.log" &
 filhos+=($!)
 for _ in $(seq 50); do grep -q atendendo "$lab/servidor.log" && break; sleep 0.1; done

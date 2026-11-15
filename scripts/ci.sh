@@ -12,5 +12,5 @@ remoteid=$(scripts/remoteid.sh)
 eval "$remoteid"
 cargo test --workspace --locked
 cargo audit --deny warnings
-shellcheck -x scripts/*.sh bin/*
+shellcheck -x scripts/*.sh bin/* drivers/*/*.sh
 actionlint

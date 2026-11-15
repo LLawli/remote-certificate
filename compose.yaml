@@ -4,11 +4,17 @@ services:
   remote-certificate:
     image: ${IMAGEM:-remote-certificate}:${TAG:-latest}
     restart: unless-stopped
+    # Fixo: o RemoteID registra a instalação com o nome da máquina, e o de um
+    # container muda a cada recriação.
+    hostname: remote-certificate
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     ulimits:
       core: 0
+    # Teto de processos e threads do container inteiro: um driver que se
+    # multiplica para aqui, não no host.
+    pids_limit: 1024
     tmpfs:
       - /tmp:size=16m,mode=1777
     secrets:

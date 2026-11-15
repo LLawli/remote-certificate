@@ -99,3 +99,20 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   a assinatura mudar.
 - O PIN pessoal confere no máximo 4 vezes ao mesmo tempo, no agente e na API,
   para limitar a memória do Argon2id.
+- Imagem do driver RemoteID (`drivers/remoteid/Dockerfile`), derivada da
+  imagem do servidor, com o `remoteid` 0.5.2 da release do RemoteID-linux
+  conferido pelo SHA-256. O `bin/deploy` encadeia os drivers de `DRIVERS`.
+- `remote-certificate isolar`: o servidor sobe cada driver isolado pelo
+  Landlock, sem privilégio nenhum. O driver lê o sistema e a própria pasta,
+  escreve só no estado do token (onde não executa nada), conecta só nas portas
+  TCP do manifesto e não manda sinal para fora; roda sem core dump, com teto de
+  memória e de arquivos abertos. O log diz o nível que o kernel aplicou.
+- Cada token tem o seu diretório de estado (`/dados/drivers/<id>`, opção
+  `--estados`), que é o diretório de trabalho do driver. O driver RemoteID não
+  precisa mais de `--estado`.
+- O manifesto do driver (`<driver>.manifesto.json`): as portas TCP e o teto de
+  memória.
+- O container tem nome de máquina fixo (o RemoteID registra a instalação com
+  ele) e um teto de 1024 processos.
+- `drivers/remoteid/conferir-imagem.sh`: a imagem no compose de produção, com
+  o servidor falso do RemoteID e uma estação assinando de verdade.

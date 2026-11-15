@@ -137,17 +137,28 @@ página a página; não precisa de um formato próprio por cima. Para onde ela v
 ## Drivers
 
 Cada driver roda por um lançador (`remote-certificate isolar -- <driver>`), que
-se restringe e então executa o driver; as restrições atravessam o `execve`:
+se restringe e então executa o driver; as restrições atravessam o `execve` e
+valem para os filhos do driver (o `remoteid`):
 
 - **Landlock** (sem privilégio nenhum, funciona com `cap_drop: ALL`; medido no
-  Docker 29): o driver lê `/usr`, `/lib`, `/etc` e o próprio executável, e
-  escreve só no diretório de estado dele. Não alcança o banco nem o secret.
-  Onde o kernel permite (ABI 4 ou mais), só conecta nas portas TCP que declarou
-  (o RemoteID, na 443).
-- `RLIMIT_CORE 0`, limite de memória, de arquivos abertos e de processos.
-- O que o driver precisa (portas, dispositivos, socket do `pcscd`) vem de um
-  manifesto ao lado do executável, que o Dockerfile do driver instala. O
-  lançador aplica o mais restrito que o kernel aceita e registra o nível obtido.
+  Docker 29, ABI 9 no kernel 7.2): o driver lê e executa `/usr`, `/lib`,
+  `/bin`, `/sbin`, `/etc` e a pasta do próprio executável, lê o nome da
+  máquina e a versão do kernel em `/proc/sys/kernel`, e escreve só no
+  diretório de estado do token, onde não executa nada. Não alcança o banco, o
+  secret nem o estado de outro token.
+- **Rede**: só conecta nas portas TCP do manifesto (o RemoteID, na 443) e não
+  escuta em nenhuma (ABI 4). Não conecta em socket UNIX nenhum (ABI 9) nem em
+  socket abstrato de fora, e não manda sinal para fora dele, nem para o
+  servidor (ABI 6).
+- **Limites**: `RLIMIT_CORE 0`, memória virtual (512 MiB no RemoteID, que
+  sobe com 128), 256 arquivos abertos. O número de processos é o
+  `pids_limit` do container: o `RLIMIT_NPROC` conta as threads do servidor
+  junto, que roda com o mesmo usuário.
+- O que o driver precisa vem do manifesto ao lado do executável
+  ([drivers.md](drivers.md#manifesto)), que o Dockerfile do driver instala. O
+  lançador aplica o mais restrito que o kernel aceita e registra o nível obtido
+  no log. Ele recusa a raiz como pasta do driver ou como diretório de trabalho,
+  que liberariam o disco inteiro.
 - Segredos chegam ao driver só pelo stdin, nunca por argumento ou ambiente.
 - O driver aplica `PR_SET_DUMPABLE 0` no próprio `main` (o `execve` volta o
   valor para 1). Vale para todo driver aceito em `drivers/`.
@@ -217,4 +228,7 @@ se restringe e então executa o driver; as restrições atravessam o `execve`:
 - **Captura de tela**: na estação, um programa do mesmo usuário pode capturar a
   janela onde a pessoa digita o OTP. O OTP é de uso único e expira rápido.
 - **Limites do Landlock** dependem do kernel do host; num kernel antigo, o
-  driver fica só com os limites de processo.
+  driver fica só com os limites de processo. O log de cada partida do driver
+  diz o nível (`isolar: ...: Landlock completo (ABI 9)`).
+- **A rede do Landlock filtra portas, não destinos**: o driver do RemoteID
+  alcança qualquer servidor na 443, não só a Certisign.

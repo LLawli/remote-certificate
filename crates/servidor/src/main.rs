@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use data_encoding::HEXLOWER;
@@ -15,11 +15,11 @@ use rustix::termios::{self, LocalModes, OptionalActions};
 use servidor::auditoria::Verificacao;
 use servidor::banco::{BANCO_PADRAO, Banco, CHAVE_PADRAO, IdDoDispositivo, ler_chave, travar};
 use servidor::driver::{Conversa, Driver};
+use servidor::lancador::{DRIVERS_PADRAO, ESTADOS_PADRAO, Lancador};
 use servidor::pin::{self, ERROS_PARA_BLOQUEAR};
 use servidor::recuperacao::{self, CodigoInvalido};
 use servidor::servico::{self, Ajustes, ENDERECO_PADRAO, Estado, VALIDADE_DO_PAREAMENTO};
 use servidor::token::{GuardaNoBanco, Token};
-use servidor::tokens::DRIVERS_PADRAO;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use zeroize::Zeroizing;
@@ -28,11 +28,11 @@ const USO: &str = "\
 uso: remote-certificate <comando>
 
   versao
-  servir [--endereco <ip:porta>] [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
-         [--sessao <segundos>]
+  servir [--endereco <ip:porta>] [--drivers <dir>] [--estados <dir>] [--banco <arquivo>]
+         [--chave <arquivo>] [--sessao <segundos>]
                      --sessao: quanto o login do PIN pessoal dura sem uso (900)
   token criar <nome> <driver> [--banco <arquivo>] [--chave <arquivo>] [-- <argumentos do driver>]
-  token configurar <nome>  [--drivers <dir>] [--banco <arquivo>] [--chave <arquivo>]
+  token configurar <nome>  [--drivers <dir>] [--estados <dir>] [--banco <arquivo>] [--chave <arquivo>]
                      pergunta o que o driver pede (os segredos sem eco)
   token listar             [--banco <arquivo>] [--chave <arquivo>]
   backup <destino> [--banco <arquivo>] [--chave <arquivo>]
@@ -51,7 +51,9 @@ uso: remote-certificate <comando>
   dispositivo revogar <id> [--banco <arquivo>] [--chave <arquivo>]
   auditoria listar [--ultimas <n>] [--banco <arquivo>] [--chave <arquivo>]
   auditoria verificar      [--banco <arquivo>] [--chave <arquivo>]
-                     refaz a corrente de selos e mostra o selo da última linha";
+                     refaz a corrente de selos e mostra o selo da última linha
+  isolar -- <driver> [argumentos]
+                     restringe o processo e vira o driver (o servidor usa sozinho)";
 
 /// Limpa a tela e o histórico do terminal, para o código não ficar ali.
 const LIMPAR_TERMINAL: &str = "\x1b[2J\x1b[3J\x1b[H";
@@ -62,6 +64,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // Os argumentos do driver passam como vieram, mesmo fora do UTF-8.
+    if args.first().is_some_and(|a| a == "isolar") {
+        eprintln!("{}", servidor::isolar::executar(&args[1..]));
+        return ExitCode::FAILURE;
+    }
     let args: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
     let resultado = match args.as_slice() {
         ["versao" | "--version"] => {
@@ -112,6 +119,15 @@ fn opcao<'a>(resto: &[&'a str], nome: &str, padrao: &'a str) -> Result<&'a str, 
     Ok(valor)
 }
 
+/// Os drivers de `--drivers`, com o estado em `--estados`, cada um isolado
+/// pelo `isolar` deste mesmo executável.
+fn lancador(resto: &[&str]) -> Result<Lancador, String> {
+    let drivers = opcao(resto, "--drivers", DRIVERS_PADRAO)?;
+    let estados = opcao(resto, "--estados", ESTADOS_PADRAO)?;
+    let executavel = std::env::current_exe().map_err(|e| e.to_string())?;
+    Ok(Lancador::novo(drivers, estados).isolado(executavel))
+}
+
 /// O banco de `--banco`, aberto com a chave de `--chave`.
 fn abrir(resto: &[&str]) -> Result<Banco, String> {
     let chave =
@@ -122,7 +138,7 @@ fn abrir(resto: &[&str]) -> Result<Banco, String> {
 
 fn servir(resto: &[&str]) -> Result<(), String> {
     let endereco = opcao(resto, "--endereco", ENDERECO_PADRAO)?;
-    let drivers = Path::new(opcao(resto, "--drivers", DRIVERS_PADRAO)?);
+    let lancador = lancador(resto)?;
     let padrao = Ajustes::default();
     let sessao = opcao(
         resto,
@@ -138,7 +154,7 @@ fn servir(resto: &[&str]) -> Result<(), String> {
     };
     let banco = Arc::new(Mutex::new(abrir(resto)?));
     let execucao = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    let estado = Estado::iniciar_com(banco, drivers, ajustes).map_err(|e| e.to_string())?;
+    let estado = Estado::iniciar_com(banco, &lancador, ajustes).map_err(|e| e.to_string())?;
     execucao.block_on(async {
         let ouvinte = tokio::net::TcpListener::bind(endereco)
             .await
@@ -294,15 +310,19 @@ fn criar_token(nome: &str, driver: &str, resto: &[&str]) -> Result<(), String> {
 /// Sobe o driver, pergunta os campos que ele declara e guarda o que o
 /// `configurar` deixar. Com o serviço rodando, ele relança o driver do token.
 fn configurar_token(nome: &str, resto: &[&str]) -> Result<(), String> {
-    let drivers = Path::new(opcao(resto, "--drivers", DRIVERS_PADRAO)?);
+    let lancador = lancador(resto)?;
     let banco = Arc::new(Mutex::new(abrir(resto)?));
     let registro = travar(&banco)
         .token(nome)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("não há token {nome}"))?;
-    let driver =
-        Driver::lancar(Command::new(drivers.join(&registro.driver)).args(&registro.argumentos))
-            .map_err(|e| e.to_string())?;
+    let mut comando = lancador.comando(&registro).map_err(|e| {
+        format!(
+            "não deu para criar o estado do token em {}: {e}",
+            lancador.estado(&registro).display()
+        )
+    })?;
+    let driver = Driver::lancar(&mut comando).map_err(|e| e.to_string())?;
     let campos = driver.apresentacao().configuracao.clone();
     let mut token =
         Token::abrir(driver, GuardaNoBanco::novo(banco, registro.id)).map_err(|e| e.to_string())?;

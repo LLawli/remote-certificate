@@ -6,7 +6,6 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +36,7 @@ use crate::api::{self, Assinaturas};
 use crate::banco::{
     Banco, FalhaDoBanco, IdDoDispositivo, IdDoUsuario, IdentidadeGuardada, Instante, travar,
 };
+use crate::lancador::Lancador;
 use crate::pin::{self, Autenticado, FalhaDoPin};
 use crate::tokens::{Evento, Tokens, erro};
 
@@ -170,21 +170,21 @@ impl Default for Ajustes {
 }
 
 impl Estado {
-    /// O estado com os tokens do banco, com os drivers em `drivers`.
+    /// O estado com os tokens do banco, cujos drivers sobem pelo `lancador`.
     pub fn iniciar(
         banco: Arc<Mutex<Banco>>,
-        drivers: &Path,
+        lancador: &Lancador,
     ) -> Result<Arc<Estado>, FalhaDoServico> {
-        Estado::iniciar_com(banco, drivers, Ajustes::default())
+        Estado::iniciar_com(banco, lancador, Ajustes::default())
     }
 
     pub fn iniciar_com(
         banco: Arc<Mutex<Banco>>,
-        drivers: &Path,
+        lancador: &Lancador,
         ajustes: Ajustes,
     ) -> Result<Arc<Estado>, FalhaDoServico> {
         let (eventos, _) = broadcast::channel(EVENTOS_NA_FILA);
-        let tokens = Tokens::iniciar(&banco, drivers, &eventos)?;
+        let tokens = Tokens::iniciar(&banco, lancador, &eventos)?;
         Ok(Arc::new(Estado {
             banco,
             tokens,

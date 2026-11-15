@@ -17,6 +17,7 @@ use rede::api::{Cliente, EstadoDaAssinatura, FalhaDaApi, PedidoDeAssinatura};
 use rede::pareamento::{self, CodigoDePareamento, FalhaDoPareamento, Pareado};
 use rede::tls::{self, Fixacao, Identidade};
 use servidor::banco::{Banco, ChaveDoBanco, IdDoDispositivo, IdDoUsuario, ler_chave, travar};
+use servidor::lancador::Lancador;
 use servidor::pin;
 use servidor::servico::{self, Ajustes, Estado, agora};
 use sha2::{Digest, Sha256};
@@ -65,7 +66,12 @@ async fn subir_com(nome: &str, tokens: &[&str], ajustes: Ajustes) -> Servidor {
     let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endereco = ouvinte.local_addr().unwrap().to_string();
     // Nenhum driver sobe: não há nenhum em /sem-drivers.
-    let estado = Estado::iniciar_com(banco.clone(), Path::new("/sem-drivers"), ajustes).unwrap();
+    let estado = Estado::iniciar_com(
+        banco.clone(),
+        &Lancador::novo("/sem-drivers", "/sem-estados"),
+        ajustes,
+    )
+    .unwrap();
     tokio::spawn(servico::servir(ouvinte, estado));
     Servidor {
         endereco,

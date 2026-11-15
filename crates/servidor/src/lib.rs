@@ -7,6 +7,8 @@ pub mod auditoria;
 pub mod banco;
 pub mod driver;
 pub mod fatores;
+pub mod isolar;
+pub mod lancador;
 pub mod pin;
 pub mod recuperacao;
 pub mod servico;

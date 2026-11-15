@@ -576,7 +576,7 @@ fn o_agente_pareado_assina_com_o_pin_pessoal_e_o_otp() {
         let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endereco = ouvinte.local_addr().unwrap().to_string();
         // O driver está num caminho absoluto: o diretório dos drivers não conta.
-        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        let estado = Estado::iniciar(banco.clone(), &lancador(&dir)).unwrap();
         tokio::spawn(servico::servir(ouvinte, estado));
 
         let codigo = servico::novo_pareamento(&banco, maria, "notebook").unwrap();
@@ -777,7 +777,7 @@ fn o_sistema_assina_um_lote_pela_api_com_o_pin_e_o_otp() {
     execucao.block_on(async {
         let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endereco = ouvinte.local_addr().unwrap().to_string();
-        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        let estado = Estado::iniciar(banco.clone(), &lancador(&dir)).unwrap();
         tokio::spawn(servico::servir(ouvinte, estado));
 
         let codigo = servico::novo_pareamento(&banco, sistema, "sistema interno").unwrap();
@@ -957,7 +957,7 @@ fn a_estacao_assina_pelo_agente_com_o_pin_pessoal_e_a_janela_do_otp() {
     let endereco = execucao.block_on(async {
         let ouvinte = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endereco = ouvinte.local_addr().unwrap().to_string();
-        let estado = Estado::iniciar(banco.clone(), Path::new("/")).unwrap();
+        let estado = Estado::iniciar(banco.clone(), &lancador(&dir)).unwrap();
         tokio::spawn(servico::servir(ouvinte, estado));
         endereco
     });

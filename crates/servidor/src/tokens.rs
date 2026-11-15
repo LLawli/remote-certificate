@@ -6,8 +6,6 @@
 //! muda).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -20,11 +18,9 @@ use crate::auditoria::Lancamento;
 use crate::banco::{Banco, FalhaDoBanco, IdDoDispositivo, RegistroDoToken, travar};
 use crate::driver::{Driver, Falha};
 use crate::fatores::{Motivo, Pessoa};
+use crate::lancador::Lancador;
 use crate::pin::Autenticado;
 use crate::token::{FalhaDoToken, GuardaNoBanco, Token};
-
-/// Onde a imagem derivada de cada driver o instala.
-pub const DRIVERS_PADRAO: &str = "/drivers";
 
 /// O que muda sem ninguém perguntar, para os agentes conectados saberem.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +93,7 @@ impl Tokens {
     /// Uma thread para cada token do banco. O driver só sobe no primeiro uso.
     pub fn iniciar(
         banco: &Arc<Mutex<Banco>>,
-        drivers: &Path,
+        lancador: &Lancador,
         eventos: &broadcast::Sender<Evento>,
     ) -> Result<Tokens, FalhaDoBanco> {
         let mut filas = BTreeMap::new();
@@ -107,7 +103,7 @@ impl Tokens {
             let trabalhador = Trabalhador {
                 registro,
                 banco: banco.clone(),
-                drivers: drivers.to_owned(),
+                lancador: lancador.clone(),
                 eventos: eventos.clone(),
                 token: None,
             };
@@ -179,7 +175,7 @@ impl Tokens {
 struct Trabalhador {
     registro: RegistroDoToken,
     banco: Arc<Mutex<Banco>>,
-    drivers: PathBuf,
+    lancador: Lancador,
     eventos: broadcast::Sender<Evento>,
     /// O driver rodando e a geração da configuração com que subiu.
     token: Option<(Token, i64)>,
@@ -254,9 +250,11 @@ impl Trabalhador {
     }
 
     fn abrir(&self) -> Result<Token, FalhaDoToken> {
-        let driver = Driver::lancar(
-            Command::new(self.drivers.join(&self.registro.driver)).args(&self.registro.argumentos),
-        )?;
+        let mut comando = self
+            .lancador
+            .comando(&self.registro)
+            .map_err(|e| FalhaDoToken::Driver(Falha::Processo(e)))?;
+        let driver = Driver::lancar(&mut comando)?;
         Ok(Token::abrir(
             driver,
             GuardaNoBanco::novo(self.banco.clone(), self.registro.id),

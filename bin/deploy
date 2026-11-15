@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publica o servidor: constrói a imagem, envia ao registro e atualiza o host.
-# Lê REGISTRO, IMAGEM, HOST_SSH e CAMINHO_REMOTO de config/deploy.env.
+# Lê REGISTRO, IMAGEM, DRIVERS, HOST_SSH e CAMINHO_REMOTO de config/deploy.env.
 #
 #   bin/deploy                    constrói, envia e sobe a versão nova
 #   bin/deploy chave              uma vez por host: gera a chave do banco
@@ -45,7 +45,17 @@ if [[ ${1:-} == chave ]]; then
     exit
 fi
 
-docker build -t "$referencia:$tag" -t "$referencia:latest" .
+# A imagem base e, por cima, a de cada driver de DRIVERS, uma sobre a outra
+# (drivers/<nome>/Dockerfile, com a anterior em BASE).
+construida="remote-certificate-base:$tag"
+docker build -t "$construida" .
+for driver in ${DRIVERS:-}; do
+    proxima="remote-certificate-$driver:$tag"
+    docker build --build-arg BASE="$construida" -f "drivers/$driver/Dockerfile" -t "$proxima" .
+    construida=$proxima
+done
+docker tag "$construida" "$referencia:$tag"
+docker tag "$construida" "$referencia:latest"
 docker push "$referencia:$tag"
 docker push "$referencia:latest"
 

@@ -168,6 +168,12 @@ impl From<rusqlite::Error> for FalhaDoBanco {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdDoToken(i64);
 
+impl fmt::Display for IdDoToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistroDoToken {
     pub id: IdDoToken,

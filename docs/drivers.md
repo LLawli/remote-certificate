@@ -11,6 +11,13 @@ os testes de lá mostram cada mensagem no fio.
 
 - O servidor lança o executável com os argumentos da configuração daquele
   token, um processo por token.
+- O diretório de trabalho é o diretório de estado do token
+  (`/dados/drivers/<id>`): só dele, mantido entre as partidas, e o único lugar
+  em que o driver escreve.
+- O driver roda isolado pelo lançador `remote-certificate isolar`
+  ([seguranca.md](seguranca.md#drivers)): lê o sistema e a pasta do próprio
+  executável, não executa o que grava e só conecta nas portas TCP do
+  manifesto.
 - A conversa é JSON, uma mensagem por linha, pelo stdin e pelo stdout. O stdout
   é só do protocolo; log vai para o stderr.
 - Uma linha tem no máximo 1 MiB (`protocolo::LINHA_MAXIMA`), nos dois
@@ -18,6 +25,20 @@ os testes de lá mostram cada mensagem no fio.
 - Um pedido por vez: o servidor só manda o próximo depois da resposta. Tokens
   físicos serializam as operações de qualquer forma.
 - Fechar o stdin encerra o driver.
+
+## Manifesto
+
+O que o driver precisa além do sistema fica num JSON ao lado do executável,
+com o nome dele mais `.manifesto.json`, instalado pelo Dockerfile do driver:
+
+```json
+{"tcp": [443], "memoria_mib": 512}
+```
+
+- `tcp`: as portas em que ele conecta. Sem manifesto, nenhuma.
+- `memoria_mib`: o teto de memória virtual de cada processo (padrão 1024).
+
+Campo desconhecido é recusado, e o driver não sobe.
 
 ## Envelope
 

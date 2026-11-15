@@ -16,6 +16,7 @@ use rsa::PublicKey;
 use rsa::pkcs8::DecodePublicKey;
 use servidor::banco::{Banco, ChaveDoBanco, IdDoToken, ler_chave, travar};
 use servidor::driver::Driver;
+use servidor::lancador::Lancador;
 use servidor::token::{GuardaNoBanco, Token};
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, Encode};
@@ -110,6 +111,13 @@ pub fn chave_publica(chave: &Chave) -> PublicKey {
         .to_der()
         .unwrap();
     PublicKey::from_public_key_der(&spki).expect("chave RSA")
+}
+
+/// Como o serviço do teste sobe os drivers: sem isolar (o driver está num
+/// caminho absoluto, e a pasta dos drivers não conta), com o estado dos tokens
+/// no diretório do teste.
+pub fn lancador(dir: &Path) -> Lancador {
+    Lancador::novo("/", dir.join("estados"))
 }
 
 /// O token configurado no banco como o administrador faria: o driver com os

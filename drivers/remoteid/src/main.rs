@@ -5,8 +5,11 @@
 //! processo filho. O `remoteid` é instalado junto deste driver.
 //!
 //! ```text
-//! remote-certificate-driver-remoteid --estado <dir> [--remoteid <executável>] [--servidor <url>]
+//! remote-certificate-driver-remoteid [--estado <dir>] [--remoteid <executável>] [--servidor <url>]
 //! ```
+//!
+//! Sem `--estado`, o estado do RemoteID fica no diretório de trabalho, que o
+//! servidor faz ser o diretório de estado do token.
 
 mod servir;
 mod traducao;
@@ -51,7 +54,11 @@ impl Opcoes {
             }
         }
         Ok(Opcoes {
-            estado: estado.ok_or("falta --estado <dir>")?,
+            estado: match estado {
+                Some(estado) => estado,
+                None => std::env::current_dir()
+                    .map_err(|e| format!("sem --estado, e o diretório de trabalho sumiu: {e}"))?,
+            },
             remoteid: remoteid.unwrap_or_else(remoteid_vizinho),
             servidor,
         })

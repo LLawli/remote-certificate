@@ -6,9 +6,9 @@ servidor e os compartilha pela rede, para escritórios (de advocacia, de
 contabilidade) que usam um único certificado em várias estações de trabalho e
 nos próprios sistemas internos.
 
-> **Em construção.** O servidor, a API e a estação Linux já funcionam com o
-> RemoteID, testados contra o servidor falso dele; falta a imagem do driver
-> para rodar em produção. O desenho está em
+> **Em construção.** O servidor, a API, a estação Linux e a imagem com o
+> driver do RemoteID já funcionam, testados contra o servidor falso do
+> RemoteID; falta o primeiro uso com uma conta de verdade. O desenho está em
 > [docs/arquitetura.md](docs/arquitetura.md).
 
 ## O que ele vai fazer
