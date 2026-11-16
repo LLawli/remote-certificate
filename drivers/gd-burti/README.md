@@ -17,21 +17,20 @@ só desempacota os arquivos (nenhum script do pacote roda). O driver e o
 manifesto vão para `/drivers`, o módulo para `/usr/lib/libaetpkss.so.3`.
 
 O SafeSign chega ao token pelo `pcscd` do host, por um socket UNIX. O
-manifesto pede só esse socket (`/run/pcscd/pcscd.comm`), sem rede, e o
-container precisa do `/run/pcscd` do host montado:
+manifesto pede só esse socket (`/run/pcscd/pcscd.comm`), sem rede. No host:
 
-```yaml
-volumes:
-  - /run/pcscd:/run/pcscd
-```
+1. `bin/deploy pcscd`, uma vez: instala a regra do polkit
+   (`deploy/50-remote-certificate-pcscd.rules`) que libera o pcscd para o uid
+   10001 do container. Sem ela, um `pcscd` com polkit recusa o driver
+   (`Process ... (user: 10001) is NOT authorized for action: access_pcsc` no
+   log dele), e o SafeSign responde como se não houvesse leitor.
+2. `COMPOSE_FILE=compose.yaml:compose.pcscd.yaml` no `.env` do host: monta o
+   `/run/pcscd` do host no container.
 
-Um `pcscd` com polkit (o padrão no Arch, no Fedora e no Debian) recusa um
-processo cujo usuário não tem permissão, e o do container é o uid 10001: o
-log do `pcscd` diz `Process ... (user: 10001) is NOT authorized for action:
-access_pcsc`, e o SafeSign responde como se não houvesse leitor. O host
-precisa de uma regra do polkit que libere `org.debian.pcsc-lite.access_pcsc`
-e `org.debian.pcsc-lite.access_card` para esse uid. A regra ainda não foi
-validada.
+O cliente do PC/SC na imagem é o do Debian 12 (protocolo 4:4), não o do
+Debian 13 (4:5): um `pcscd` mais velho que o cliente recusa a conversa
+(`Communication protocol mismatch` no log dele), e o do Ubuntu 24.04 fala o
+4:4. Um `pcscd` mais novo atende o cliente mais velho.
 
 ## Token
 

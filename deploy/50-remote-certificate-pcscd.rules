@@ -1,0 +1,13 @@
+// O driver de um token físico roda no container com o uid 10001 (o usuário
+// certificado da imagem) e fala com o leitor pelo pcscd do host, que pergunta
+// ao polkit. Sem esta regra, o pcscd recusa o processo ("NOT authorized for
+// action: access_pcsc"). O uid não tem nome no host: o polkit o dá em número.
+//
+// Instalada por `bin/deploy pcscd` em /etc/polkit-1/rules.d/.
+polkit.addRule(function (action, subject) {
+    if ((action.id == "org.debian.pcsc-lite.access_pcsc" ||
+         action.id == "org.debian.pcsc-lite.access_card") &&
+        subject.user == "10001") {
+        return polkit.Result.YES;
+    }
+});

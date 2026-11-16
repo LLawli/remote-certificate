@@ -35,15 +35,27 @@ RUN dpkg-deb -x /safesign.deb /pacote \
     && test -f /out/usr/lib/libaetpkss.so.3.9.33.1 \
     && test -e /out/usr/lib/libaetpkss.so.3
 
+# O cliente do PC/SC do Debian 12 (pcsc-lite 1.9.9, protocolo 4:4), não o do
+# Debian 13 (2.3.3, protocolo 4:5). Quem atende é o pcscd do host, e um pcscd
+# mais velho recusa um cliente mais novo ("Communication protocol mismatch"):
+# o do Ubuntu 24.04 (2.0.3, 4:4) recusa o 4:5. Um pcscd mais novo atende um
+# cliente mais velho (medido com o 2.5.3, 4:6). Só depende da libc.
+FROM debian:bookworm-slim AS pcsclite
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpcsclite1 \
+    && mkdir -p /out/usr/lib/x86_64-linux-gnu \
+    && cp -a /usr/lib/x86_64-linux-gnu/libpcsclite.so.1* /out/usr/lib/x86_64-linux-gnu/
+
 FROM ${BASE}
 USER root
 # O que o libaetpkss.so pede (readelf -d): o GDBM (o Tessera o baixa do
 # Ubuntu porque o runtime do Flatpak não tem; aqui vem do Debian), o cliente
-# do PC/SC, o OpenSSL 3 e a libstdc++. O pcscd fica no host.
+# do PC/SC (do estágio acima), o OpenSSL 3 e a libstdc++. O pcscd fica no host.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libgdbm-compat4t64 libpcsclite1 libssl3t64 libstdc++6 \
+        libgdbm-compat4t64 libssl3t64 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=pcsclite /out/ /
 COPY --from=safesign /out/ /
 COPY --from=build /out/remote-certificate-driver-gd-burti /drivers/
 # O manifesto deixa o driver conectar no socket do pcscd, e só nele.

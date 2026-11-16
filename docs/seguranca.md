@@ -161,6 +161,11 @@ valem para os filhos do driver (o `remoteid`):
   lançador aplica o mais restrito que o kernel aceita e registra o nível obtido
   no log. Ele recusa a raiz como pasta do driver ou como diretório de trabalho,
   que liberariam o disco inteiro.
+- **Token físico**: o driver fala com o leitor pelo `pcscd` do host, cujo
+  socket o `compose.pcscd.yaml` monta só para leitura. A regra do polkit do
+  `bin/deploy pcscd` dá ao uid 10001 acesso a todos os leitores do host, e
+  vale para qualquer processo do host com esse uid: num host só do servidor,
+  é o container.
 - Segredos chegam ao driver só pelo stdin, nunca por argumento ou ambiente.
 - O driver aplica `PR_SET_DUMPABLE 0` no próprio `main` (o `execve` volta o
   valor para 1). Vale para todo driver aceito em `drivers/`.

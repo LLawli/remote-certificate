@@ -393,10 +393,19 @@ rodar e testar está no [README do driver](../drivers/gd-burti/README.md).
   confere antes de pedir o PIN) vira `bloqueado`; token removido,
   `token_ausente`.
 - **Validado sem token físico**: com o SoftHSM2 (CI) e com o cartão virtual
-  do gdburti-rs, que fala os APDUs do applet da GD Burti (fora do CI). Dentro
-  da imagem e isolado, o driver chega ao `pcscd` do host, que o recusa pelo
-  polkit até o host ter uma regra para o uid do container (README do
-  driver). Falta essa regra e o token real.
+  do gdburti-rs, que fala os APDUs do applet da GD Burti (fora do CI).
+- **Ponta a ponta em VMs** (2026-11-16): servidor num Ubuntu 24.04 mínimo
+  (compose de produção, `pcscd` do host, regra do polkit, leitora virtual do
+  vsmartcard com o cartão do gdburti-rs) e estação num Ubuntu 24.04 GNOME. A
+  estação assinou com os quatro mecanismos (conferidos com o certificado) e
+  um PDF pelo `pdfsig`; a auditoria registrou tudo. Com o PIN do cartão
+  trocado, a primeira assinatura parou o token e o PIN velho chegou ao cartão
+  uma vez só; reconfigurado, voltou a assinar.
+- **O SafeSign oficial não fecha com a leitora virtual**: ele troca APDUs com
+  o cartão emulado, mas manda um `SCardControl` que o vsmartcard não
+  implementa e fica esperando. Na bancada o driver usa o módulo do gdburti-rs
+  (`--modulo`), pelo mesmo `pcscd`. O SafeSign com o token físico continua
+  por validar.
 
 ## Novos drivers
 

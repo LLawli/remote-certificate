@@ -30,6 +30,9 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   PIN travado como `bloqueado`, sem gastar tentativa. O manifesto pede só o
   socket do `pcscd` do host. Validado com o SoftHSM2 e com o cartão virtual
   do gdburti-rs; falta o token físico.
+- `bin/deploy pcscd` e `compose.pcscd.yaml`: num host com token físico, a
+  regra do polkit que deixa o driver no container (uid 10001) usar o `pcscd`
+  do host, e o socket dele montado no container.
 - O servidor responde os fatores guardados (PIN e senha) sem que ninguém os
   conheça, e para o token, sem nova tentativa, quando o token recusa um deles,
   mesmo que o token peça junto um fator da pessoa. O token parado continua

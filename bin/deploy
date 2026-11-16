@@ -6,10 +6,12 @@
 #   bin/deploy chave              uma vez por host: gera a chave do banco
 #                                 selada no TPM e mostra o código de recuperação
 #   bin/deploy chave --restaurar  num host novo: a chave vem do código
+#   bin/deploy pcscd              uma vez por host com token físico: deixa o
+#                                 driver no container falar com o pcscd do host
 #
-# Os dois `chave` pedem sudo no host e precisam de um terminal. No primeiro
-# deploy de um host, a ordem é: bin/deploy (publica a imagem e para pedindo a
-# chave), bin/deploy chave, bin/deploy. Um host sem TPM nem systemd pode usar
+# Os dois `chave` e o `pcscd` pedem sudo no host e precisam de um terminal.
+# No primeiro deploy de um host, a ordem é: bin/deploy (publica a imagem e
+# para pedindo a chave), bin/deploy chave, bin/deploy. Um host sem TPM nem systemd pode usar
 # um arquivo comum: CHAVE=<arquivo 0400 do uid 10001> no .env do host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,13 +30,14 @@ tag=$(jj log -r @ --no-graph -T 'commit_id.short(12)' 2>/dev/null \
 referencia="$REGISTRO/$IMAGEM"
 
 # Os arquivos do host vão junto a cada vez: o compose.yaml traz o
-# endurecimento do container, e deploy/ a receita da chave.
+# endurecimento do container, e deploy/ a receita da chave e a regra do
+# polkit do pcscd.
 copiar_para_o_host() {
     # shellcheck disable=SC2029  # as variáveis expandem aqui de propósito
     ssh "$HOST_SSH" "mkdir -p '$CAMINHO_REMOTO/deploy'"
-    scp -q compose.yaml "$HOST_SSH:$CAMINHO_REMOTO/"
+    scp -q compose.yaml compose.pcscd.yaml "$HOST_SSH:$CAMINHO_REMOTO/"
     scp -q deploy/chave.sh deploy/remote-certificate-chave.service \
-        "$HOST_SSH:$CAMINHO_REMOTO/deploy/"
+        deploy/50-remote-certificate-pcscd.rules "$HOST_SSH:$CAMINHO_REMOTO/deploy/"
 }
 
 if [[ ${1:-} == chave ]]; then
@@ -42,6 +45,16 @@ if [[ ${1:-} == chave ]]; then
     # shellcheck disable=SC2029
     ssh -t "$HOST_SSH" "cd '$CAMINHO_REMOTO' && docker pull -q '$referencia:latest' >/dev/null \
         && sudo deploy/chave.sh '$referencia:latest' ${2:-}"
+    exit
+fi
+
+# A regra do polkit que libera o pcscd do host para o uid do container; o
+# polkit a lê sozinho. O compose.pcscd.yaml monta o socket (ver o arquivo).
+if [[ ${1:-} == pcscd ]]; then
+    copiar_para_o_host
+    # shellcheck disable=SC2029
+    ssh -t "$HOST_SSH" "cd '$CAMINHO_REMOTO' \
+        && sudo install -m 0644 deploy/50-remote-certificate-pcscd.rules /etc/polkit-1/rules.d/"
     exit
 fi
 

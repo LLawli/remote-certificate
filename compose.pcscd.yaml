@@ -1,0 +1,11 @@
+# Para um driver de token físico (GD Burti): o socket do pcscd do host dentro
+# do container. Entra no .env do host com
+#
+#   COMPOSE_FILE=compose.yaml:compose.pcscd.yaml
+#
+# e o host precisa da regra do polkit (bin/deploy pcscd). Só leitura: conectar
+# no socket não escreve nada.
+services:
+  remote-certificate:
+    volumes:
+      - /run/pcscd:/run/pcscd:ro
