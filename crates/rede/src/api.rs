@@ -44,6 +44,9 @@ pub const LIMITE_DO_CORPO: usize = LIMITE_DA_MENSAGEM;
 pub const DOCUMENTOS_POR_LOTE: usize = 1000;
 /// O máximo que um `GET ?esperar=` segura a resposta.
 pub const ESPERA_MAXIMA: Duration = Duration::from_secs(60);
+/// Quanto um pedido que falhou espera a conexão terminar para saber a causa
+/// (o alerta do TLS). Ela já está fechando; o prazo só evita ficar preso.
+const ESPERA_PELA_CAUSA: Duration = Duration::from_secs(2);
 
 pub fn caminho_da_assinatura(id: &str) -> String {
     format!("{ASSINATURAS}/{id}")
@@ -151,7 +154,8 @@ impl fmt::Display for FalhaDaApi {
 /// Um sistema integrado falando com o servidor, numa conexão só.
 pub struct Cliente {
     envio: SendRequest<Full<Bytes>>,
-    conversa: JoinHandle<Result<(), hyper::Error>>,
+    /// A tarefa da conexão; sai daqui na primeira falha, que lê a causa dela.
+    conversa: Option<JoinHandle<Result<(), hyper::Error>>>,
 }
 
 impl Cliente {
@@ -170,7 +174,7 @@ impl Cliente {
             .map_err(do_hyper)?;
         Ok(Cliente {
             envio,
-            conversa: tokio::spawn(conversa),
+            conversa: Some(tokio::spawn(conversa)),
         })
     }
 
@@ -239,9 +243,11 @@ impl Cliente {
         let resposta = match resposta {
             Ok(resposta) => resposta,
             Err(e) => {
-                // A falha de verdade (o alerta do TLS) fica com a conversa.
-                if self.conversa.is_finished()
-                    && let Ok(Err(causa)) = (&mut self.conversa).await
+                // A falha de verdade (o alerta do TLS) fica com a conversa,
+                // que pode ainda estar terminando quando o pedido falha.
+                if let Some(conversa) = self.conversa.take()
+                    && let Ok(Ok(Err(causa))) =
+                        tokio::time::timeout(ESPERA_PELA_CAUSA, conversa).await
                 {
                     return Err(do_hyper(causa));
                 }
