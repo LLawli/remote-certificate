@@ -10,7 +10,9 @@ os testes de lá mostram cada mensagem no fio.
 ## Como o servidor roda um driver
 
 - O servidor lança o executável com os argumentos da configuração daquele
-  token, um processo por token.
+  token, um processo por token. Os argumentos são os que o administrador deu
+  depois do `--` em `remote-certificate token criar <nome> <driver> --
+  <argumentos>`; nenhum segredo vai por argumento nem por ambiente.
 - O diretório de trabalho é o diretório de estado do token
   (`/dados/drivers/<id>`): só dele, mantido entre as partidas, e o único lugar
   em que o driver escreve.
@@ -60,9 +62,14 @@ O driver responde com o resultado ou com uma falha:
 ```
 
 `tipo` é estável e serve para o servidor decidir; `mensagem` é para a pessoa
-ler. Os tipos: `pedido_invalido`, `versao_incompativel`, `token_ausente`,
-`nao_configurado`, `chave_ausente`, `mecanismo_nao_suportado`,
-`fator_recusado`, `bloqueado`, `cancelado`, `rede`. Um tipo que o servidor não conhece é lido como `outro`.
+ler e nunca traz um segredo. Os tipos: `pedido_invalido`,
+`versao_incompativel`, `token_ausente`, `nao_configurado`, `chave_ausente`,
+`mecanismo_nao_suportado`, `fator_recusado`, `bloqueado`, `cancelado`, `rede`
+e `outro`, para uma falha sem tipo próprio. Um tipo que o servidor não conhece
+é lido como `outro`.
+
+Um pedido ilegível recebe `pedido_invalido` com o `id` que der para ler dele,
+ou 0.
 
 ## Operações
 
@@ -96,7 +103,14 @@ fatores pode pedir. Quem decide se as duas versões se entendem é o servidor
 ### `configurar`
 
 Prepara o token com os campos de `configuracao`, que o servidor pede ao
-administrador. Um token físico costuma ter só o `pin`.
+administrador. Um token físico costuma ter só o `pin`. Todos os valores chegam
+como texto e o servidor trata todos como segredo, mesmo os de um campo que não
+é `secreto`.
+
+O servidor só manda `configurar` quando o administrador configura o token, não
+a cada partida do driver. O que o driver precisa lembrar entre partidas (qual
+token, qual conta) ele grava no diretório de estado, nunca um segredo em
+claro. Se o `configurar` falha, o servidor não guarda nada.
 
 ```json
 {"id": 2, "op": "configurar", "valores": {"email": "...", "senha": "..."}}
@@ -137,6 +151,12 @@ conhece é ignorado.
 Com `CKM_RSA_PKCS`, `dados` é o DigestInfo pronto; com `CKM_SHA256_RSA_PKCS` e
 parecidos, os dados inteiros; com `CKM_RSA_PKCS_PSS` e `CKM_ECDSA`, o hash.
 
+- `CKM_RSA_PKCS_PSS`: o hash é SHA-256, SHA-384 ou SHA-512, conforme o
+  tamanho (32, 48 ou 64 bytes). O MGF1 usa o mesmo hash, e o sal tem o
+  tamanho do hash, como no TLS 1.3.
+- `CKM_ECDSA`: a assinatura volta como `r‖s`, cada metade do tamanho da ordem
+  da curva, o formato do PKCS#11, não DER.
+
 ## Fatores no meio de uma operação
 
 Quando precisa de fatores, o driver pergunta antes de responder, no mesmo `id`:
@@ -151,6 +171,9 @@ e o servidor responde com os fatores ou desiste:
 {"id": 4, "fatores": {"pin": "...", "otp": "123456"}}
 {"id": 4, "cancelar": true}
 ```
+
+`cancelar` é sempre `true`. Depois dele, o driver responde o pedido com
+`cancelado`.
 
 `recusa` traz a mensagem da tentativa anterior quando o token recusou. O
 driver pode pedir de novo, e o servidor decide:
@@ -172,6 +195,26 @@ driver pode pedir de novo, e o servidor decide:
   Por isso, quando só o fator da pessoa foi recusado (um OTP digitado errado),
   o driver pede de novo com `recusa` só com os fatores da pessoa, em vez de
   desistir.
+
+## Empacotamento
+
+- **O código** fica em `drivers/<nome>/`. Um driver em Rust é membro do
+  workspace (`members` no `Cargo.toml` da raiz) e usa o crate `protocolo`; em
+  outra linguagem, ele traz o próprio estágio de compilação no Dockerfile.
+- **A imagem** é derivada da imagem base do servidor, que não traz driver
+  nenhum. O `drivers/<nome>/Dockerfile` é construído com a raiz do
+  repositório como contexto e recebe a base em `ARG BASE`
+  (`remote-certificate:latest` por padrão); o `bin/deploy` encadeia os
+  drivers de `DRIVERS`, cada um sobre o anterior. A base é Debian (glibc) e
+  roda como o usuário `certificado`: o que o driver precisa do sistema entra
+  com `apt-get` num `USER root`, voltando ao `USER certificado` no fim. O
+  binário do fornecedor é baixado do link oficial com o SHA-256 conferido
+  (`ADD --checksum`), e os scripts do pacote não rodam.
+- **Onde fica**: o executável e o manifesto vão para `/drivers/`, onde o
+  servidor os procura (`servir --drivers`). Todos os drivers da imagem dividem
+  essa pasta, que cada um só lê.
+- **O token**: `remote-certificate token criar <nome> <executável> --
+  <argumentos>` e depois `token configurar <nome>`.
 
 ## Segredos
 
