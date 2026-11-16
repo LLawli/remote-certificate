@@ -1,4 +1,4 @@
-# Contrato de driver (v0, rascunho)
+# Contrato de driver (v0)
 
 Um driver é o que sabe falar com um tipo de token. É um executável à parte,
 instalado só por quem tem aquele token, e qualquer linguagem serve. Um driver
@@ -24,7 +24,7 @@ os testes de lá mostram cada mensagem no fio.
   sentidos. Quem recebe uma maior encerra a conversa.
 - Um pedido por vez: o servidor só manda o próximo depois da resposta. Tokens
   físicos serializam as operações de qualquer forma.
-- Fechar o stdin encerra o driver.
+- Fechar o stdin encerra o driver. Quem não sai em 2 segundos é morto.
 
 ## Manifesto
 
@@ -64,8 +64,10 @@ ler. Os tipos: `pedido_invalido`, `versao_incompativel`, `token_ausente`,
 
 ### `apresentar`
 
-A primeira mensagem de toda conversa. O servidor diz a versão do contrato; o
-driver responde quem é e que fatores pode pedir, ou `versao_incompativel`.
+A primeira mensagem de toda conversa. O servidor diz a versão do contrato que
+fala; o driver responde quem é, a versão que ele fala (`protocolo`) e que
+fatores pode pedir. Quem decide se as duas versões se entendem é o servidor
+(ver [Versão](#versão)): o driver não recusa a apresentação pela versão.
 
 ```json
 {"id": 1, "ok": {
@@ -100,7 +102,8 @@ administrador. Um token físico costuma ter só o `pin`.
 O servidor guarda, como fatores `guardado`, os campos que têm o nome de um
 fator guardado e o que vier em `guardar`: segredos que o próprio driver gerou e
 que ninguém precisa conhecer (o RemoteID gera ali o PIN local que cifra a
-senha). Sem nada a guardar, `guardar` vem vazio.
+senha). Em `guardar`, um nome que não é de um fator guardado declarado na
+apresentação é descartado. Sem nada a guardar, `guardar` vem vazio.
 
 ### `listar`
 
@@ -150,6 +153,8 @@ driver pode pedir de novo, e o servidor decide:
 
 - Os fatores `guardado` saem do cofre; os `da_pessoa`, de quem pediu a
   operação, que nunca responde um fator guardado.
+- Um pedido com um fator que o driver não declarou na apresentação é
+  cancelado.
 - Depois de uma `recusa`, o driver só pede de novo um fator guardado se foi
   ele que o token recusou. Um pedido com `recusa` que traz um fator guardado é
   cancelado, mesmo que traga também um da pessoa: o segredo guardado está
@@ -165,5 +170,21 @@ em disco nem em log, inclusive no stderr.
 
 ## Versão
 
-`protocolo` muda quando uma mensagem muda de forma incompatível. Campo novo e
-opcional não muda a versão.
+A versão do contrato (`protocolo::VERSAO`) muda quando uma mensagem muda de
+forma incompatível. Campo novo e opcional não muda a versão.
+
+Cada versão declara as versões anteriores com que é compatível, na tabela
+`protocolo::COMPATIBILIDADE`. O servidor aceita um driver quando chega
+à versão dele seguindo essas declarações a partir da sua:
+
+- A compatibilidade é transitiva. Com o servidor no v10 e o driver no v5, se o
+  v10 declara o v9, o v9 declara o v8, e assim até o v5, o driver sobe.
+- Uma versão que não declara a anterior é uma breaking change e corta a
+  cadeia. Se o v5 não declara nenhuma, um driver no v4 não sobe com nenhum
+  servidor do v5 em diante.
+- Um driver mais novo que o servidor nunca sobe, mesmo que se diga compatível
+  com versões antigas: o servidor só conhece a tabela até a própria versão.
+  Atualize o servidor antes do driver.
+
+A recusa é na apresentação, com uma mensagem que traz as duas versões, e nunca
+no meio de uma operação.

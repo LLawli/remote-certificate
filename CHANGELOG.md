@@ -8,8 +8,12 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 
 ### Added
 
-- Contrato de driver v0 (rascunho), em `docs/drivers.md` e `crates/protocolo`,
-  com a configuração do token declarada pelo próprio driver.
+- Contrato de driver v0, em `docs/drivers.md` e `crates/protocolo`, com a
+  configuração do token declarada pelo próprio driver. Cada versão do contrato
+  declara as anteriores com que é compatível, e o servidor aceita um driver
+  quando chega à versão dele por essa cadeia; uma breaking change corta a
+  cadeia, e um driver mais novo que o servidor é recusado. A recusa é na
+  partida do driver, com as duas versões na mensagem.
 - Driver do RemoteID (`remote-certificate-driver-remoteid`), sobre o
   `remoteid servir`: assina com `CKM_RSA_PKCS` e `CKM_SHA256_RSA_PKCS`,
   `CKM_SHA384_RSA_PKCS` e `CKM_SHA512_RSA_PKCS`, pedindo o OTP a quem assina.

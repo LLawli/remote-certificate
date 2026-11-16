@@ -9,6 +9,7 @@ mod linha;
 mod mecanismo;
 mod mensagem;
 mod segredo;
+mod versao;
 
 pub use linha::{LINHA_MAXIMA, ler_linha};
 pub use mecanismo::{Mecanismo, suporta_tls13};
@@ -17,6 +18,4 @@ pub use mensagem::{
     Operacao, Pedido, PedidoDeFatores, RespostaDeFatores, TipoDeErro, TipoDeFator,
 };
 pub use segredo::Segredo;
-
-/// Versão do contrato. Muda quando uma mensagem muda de forma incompatível.
-pub const VERSAO: u32 = 0;
+pub use versao::{COMPATIBILIDADE, VERSAO, aceita_driver};

@@ -94,9 +94,10 @@ impl Driver {
         };
         let apresentacao: Apresentacao =
             driver.pedir(Operacao::Apresentar { versao: VERSAO }, &mut |_| None)?;
-        if apresentacao.protocolo != VERSAO {
+        // Recusado aqui, na partida, e nunca no meio de uma assinatura.
+        if !protocolo::aceita_driver(apresentacao.protocolo) {
             return Err(Falha::Contrato(format!(
-                "fala o contrato v{}, o servidor fala o v{VERSAO}",
+                "fala o contrato v{}, que o servidor no contrato v{VERSAO} não aceita",
                 apresentacao.protocolo
             )));
         }
@@ -203,5 +204,42 @@ impl Drop for Driver {
         }
         let _ = self.filho.kill();
         let _ = self.filho.wait();
+    }
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// Um driver de mentira que se apresenta com o contrato `protocolo` e
+    /// depois só espera o stdin fechar.
+    fn falso(protocolo: u32) -> Command {
+        let apresentacao = format!(
+            r#"{{"id":1,"ok":{{"driver":"falso","versao":"0","protocolo":{protocolo},"fatores":[],"configuracao":[]}}}}"#
+        );
+        let mut comando = Command::new("sh");
+        comando.arg("-c").arg(format!(
+            "read pedido; echo '{apresentacao}'; cat >/dev/null"
+        ));
+        comando
+    }
+
+    #[test]
+    fn driver_na_versao_do_servidor_sobe() {
+        let driver = Driver::lancar(&mut falso(VERSAO)).unwrap();
+        assert_eq!(driver.apresentacao().driver, "falso");
+    }
+
+    #[test]
+    fn driver_fora_da_cadeia_e_recusado_na_partida() {
+        let novo = VERSAO + 1;
+        match Driver::lancar(&mut falso(novo)) {
+            Err(Falha::Contrato(o_que)) => {
+                assert!(o_que.contains(&format!("v{novo}")), "{o_que}");
+                assert!(o_que.contains(&format!("v{VERSAO}")), "{o_que}");
+            }
+            Err(outra) => panic!("falha inesperada: {outra}"),
+            Ok(_) => panic!("aceitou um driver no contrato v{novo}"),
+        }
     }
 }

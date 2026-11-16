@@ -24,7 +24,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use protocolo::{
     Configurado, Erro, MensagemDoDriver, Operacao, Pedido, RespostaDeFatores, Segredo, TipoDeErro,
-    VERSAO,
 };
 use serde_json::{Value, json};
 
@@ -137,10 +136,8 @@ impl<E: BufRead, S: Write> Driver<E, S> {
 
     fn executar(&mut self, id: u64, operacao: Operacao) -> io::Result<Result<Value, Erro>> {
         match operacao {
-            Operacao::Apresentar { versao } if versao != VERSAO => Ok(Err(Erro {
-                tipo: TipoDeErro::VersaoIncompativel,
-                mensagem: format!("este driver fala o contrato v{VERSAO}"),
-            })),
+            // Quem decide se as versões se entendem é o servidor
+            // (docs/drivers.md, "Versão").
             Operacao::Apresentar { .. } => Ok(Ok(json!(traducao::apresentacao()))),
             Operacao::Configurar { valores } => self.configurar(id, &valores),
             Operacao::Listar => Ok(self
