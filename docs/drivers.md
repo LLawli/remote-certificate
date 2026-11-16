@@ -162,6 +162,12 @@ driver pode pedir de novo, e o servidor decide:
   físico nunca recebe a mesma tentativa errada duas vezes.
 - Um pedido com `recusa` só com fatores da pessoa volta à pessoa com a
   mensagem.
+- Um driver também pode desistir respondendo `fator_recusado`. Se a última
+  resposta de fatores daquela operação levou um fator guardado, o servidor
+  para o token do mesmo jeito, porque não sabe qual dos fatores foi recusado.
+  Por isso, quando só o fator da pessoa foi recusado (um OTP digitado errado),
+  o driver pede de novo com `recusa` só com os fatores da pessoa, em vez de
+  desistir.
 
 ## Segredos
 

@@ -23,7 +23,8 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - O servidor responde os fatores guardados (PIN e senha) sem que ninguém os
   conheça, e para o token, sem nova tentativa, quando o token recusa um deles,
   mesmo que o token peça junto um fator da pessoa. O token parado continua
-  parado depois de o servidor reiniciar.
+  parado depois de o servidor reiniciar. O token também para quando o driver
+  desiste com `fator_recusado` logo depois de receber um fator guardado.
 - Banco SQLite cifrado inteiro com SQLCipher, com a chave num secret do
   Docker, travada na RAM. Guarda os tokens e os fatores guardados; recusa
   abrir um banco em claro.

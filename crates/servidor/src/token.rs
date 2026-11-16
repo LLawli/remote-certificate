@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use protocolo::{Chave, Mecanismo, Segredo};
+use protocolo::{Chave, Fator, Mecanismo, Segredo, TipoDeErro, TipoDeFator};
 
 use crate::banco::{Banco, FalhaDoBanco, IdDoToken, travar};
 use crate::driver::{Conversa, Driver, Falha};
@@ -154,6 +154,8 @@ impl<C: Conversa, G: Guarda> Token<C, G> {
         let declarados = self.driver.apresentacao().fatores.clone();
         let cofre = &self.cofre;
         let mut motivo = None;
+        // Os fatores guardados da última resposta ao driver nesta operação.
+        let mut guardados_enviados = Vec::new();
         let resultado = self
             .driver
             .assinar(chave, mecanismo, dados, &mut |pedido| match decidir(
@@ -162,7 +164,10 @@ impl<C: Conversa, G: Guarda> Token<C, G> {
                 cofre,
                 pessoa,
             ) {
-                Decisao::Responder(fatores) => Some(fatores),
+                Decisao::Responder(fatores) => {
+                    guardados_enviados = guardados(&declarados, &fatores);
+                    Some(fatores)
+                }
                 Decisao::Cancelar(m) => {
                     motivo = Some(m);
                     None
@@ -170,24 +175,46 @@ impl<C: Conversa, G: Guarda> Token<C, G> {
             });
         match (resultado, motivo) {
             (Ok(assinatura), _) => Ok(assinatura),
-            (Err(_), Some(Motivo::GuardadoRecusado(nomes))) => {
-                // Parado na memória mesmo que o banco falhe: nesta vida do
-                // processo o token não recebe outra tentativa.
-                self.desatualizado = Some(nomes.clone());
-                self.guarda.desatualizado(&nomes)?;
-                Err(FalhaDoToken::Desatualizado(nomes))
-            }
+            (Err(_), Some(Motivo::GuardadoRecusado(nomes))) => self.parar(nomes),
             (Err(_), Some(motivo)) => Err(FalhaDoToken::Cancelado(motivo)),
+            // O driver desistiu com `fator_recusado` em vez de pedir de novo
+            // com `recusa`: se a última resposta levou um fator guardado, ele
+            // pode ser o recusado, e reenviá-lo na próxima operação gastaria
+            // outra tentativa do token (docs/drivers.md).
+            (Err(Falha::Driver(erro)), None)
+                if erro.tipo == TipoDeErro::FatorRecusado && !guardados_enviados.is_empty() =>
+            {
+                self.parar(guardados_enviados)
+            }
             (Err(falha), None) => Err(FalhaDoToken::Driver(falha)),
         }
     }
+
+    fn parar(&mut self, nomes: Vec<String>) -> Result<Vec<u8>, FalhaDoToken> {
+        // Parado na memória mesmo que o banco falhe: nesta vida do processo o
+        // token não recebe outra tentativa.
+        self.desatualizado = Some(nomes.clone());
+        self.guarda.desatualizado(&nomes)?;
+        Err(FalhaDoToken::Desatualizado(nomes))
+    }
+}
+
+/// Os nomes, entre `fatores`, dos que são guardados.
+fn guardados(declarados: &[Fator], fatores: &BTreeMap<String, Segredo>) -> Vec<String> {
+    fatores
+        .keys()
+        .filter(|nome| {
+            declarados
+                .iter()
+                .any(|f| &f.nome == *nome && f.tipo == TipoDeFator::Guardado)
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
 mod testes {
-    use protocolo::{
-        Apresentacao, Configurado, Erro, Fator, Listagem, PedidoDeFatores, TipoDeErro, TipoDeFator,
-    };
+    use protocolo::{Apresentacao, Configurado, Erro, Listagem, PedidoDeFatores};
 
     use super::*;
     use crate::driver::Responder;
@@ -197,6 +224,9 @@ mod testes {
         apresentacao: Apresentacao,
         certo: &'static str,
         tentativas: u32,
+        /// Com o PIN errado, desiste com `fator_recusado` em vez de pedir de
+        /// novo com `recusa`.
+        desiste: bool,
     }
 
     impl TokenComPin {
@@ -215,6 +245,14 @@ mod testes {
                 },
                 certo,
                 tentativas: 0,
+                desiste: false,
+            }
+        }
+
+        fn que_desiste(certo: &'static str) -> Self {
+            TokenComPin {
+                desiste: true,
+                ..TokenComPin::novo(certo)
             }
         }
     }
@@ -255,6 +293,12 @@ mod testes {
                 self.tentativas += 1;
                 if resposta["pin"].expor() == self.certo {
                     return Ok(vec![1]);
+                }
+                if self.desiste {
+                    return Err(Falha::Driver(Erro {
+                        tipo: TipoDeErro::FatorRecusado,
+                        mensagem: "PIN incorreto".into(),
+                    }));
                 }
                 recusa = Some("PIN incorreto".into());
             }
@@ -390,5 +434,72 @@ mod testes {
             &mut Ninguem,
         );
         assert_eq!(assinatura.unwrap(), [1]);
+    }
+
+    #[test]
+    fn fator_recusado_final_depois_de_um_guardado_tambem_para_o_token() {
+        let mut guarda = guardado("0000");
+        let mut token = Token::abrir(TokenComPin::que_desiste("4321"), &mut guarda).unwrap();
+        let assinar = |token: &mut Token<TokenComPin, _>| {
+            token.assinar(
+                &Autenticado::de_teste(),
+                "k",
+                Mecanismo::RsaPkcs,
+                b"x",
+                &mut Ninguem,
+            )
+        };
+
+        let falha = assinar(&mut token);
+        assert!(matches!(falha, Err(FalhaDoToken::Desatualizado(ref n)) if n == &["pin"]));
+        assert!(matches!(
+            assinar(&mut token),
+            Err(FalhaDoToken::Desatualizado(_))
+        ));
+        assert_eq!(token.driver().tentativas, 1);
+        drop(token);
+        assert_eq!(
+            guarda.desatualizado.as_deref(),
+            Some(&["pin".to_string()][..])
+        );
+    }
+
+    /// Responde o `pin` como fator da pessoa, sempre com o mesmo valor.
+    struct Digita(&'static str);
+
+    impl Pessoa for Digita {
+        fn pedir(&mut self, _: &[&Fator], _: Option<&str>) -> Option<BTreeMap<String, Segredo>> {
+            Some(cofre(self.0))
+        }
+    }
+
+    #[test]
+    fn fator_recusado_final_so_com_fator_da_pessoa_nao_para_o_token() {
+        let mut driver = TokenComPin::que_desiste("4321");
+        driver.apresentacao.fatores[0].tipo = TipoDeFator::DaPessoa;
+        let mut guarda = EmMemoria::default();
+        let mut token = Token::abrir(driver, &mut guarda).unwrap();
+
+        let falha = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Digita("0000"),
+        );
+        assert!(matches!(
+            falha,
+            Err(FalhaDoToken::Driver(Falha::Driver(ref e))) if e.tipo == TipoDeErro::FatorRecusado
+        ));
+        let assinatura = token.assinar(
+            &Autenticado::de_teste(),
+            "k",
+            Mecanismo::RsaPkcs,
+            b"x",
+            &mut Digita("4321"),
+        );
+        assert_eq!(assinatura.unwrap(), [1]);
+        drop(token);
+        assert_eq!(guarda.desatualizado, None);
     }
 }
