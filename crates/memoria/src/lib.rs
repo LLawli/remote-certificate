@@ -120,16 +120,29 @@ pub fn endurecer_processo() -> io::Result<()> {
 mod testes {
     use super::*;
 
-    /// As flags do kernel para o mapeamento que começa em `endereco`
-    /// (`VmFlags` do `/proc/self/smaps`).
+    /// As flags do kernel para o mapeamento que contém `endereco` (`VmFlags`
+    /// do `/proc/self/smaps`). Contém, e não começa: o kernel junta a página
+    /// à de outro teste em paralelo quando as duas têm as mesmas flags.
     fn flags_do_mapeamento(endereco: usize) -> Vec<String> {
         let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
-        let inicio = format!("{endereco:x}-");
+        let contem = |linha: &str| {
+            let Some((inicio, resto)) = linha.split_once('-') else {
+                return false;
+            };
+            let fim = resto.split_whitespace().next().unwrap_or_default();
+            match (
+                usize::from_str_radix(inicio, 16),
+                usize::from_str_radix(fim, 16),
+            ) {
+                (Ok(inicio), Ok(fim)) => (inicio..fim).contains(&endereco),
+                _ => false,
+            }
+        };
         smaps
             .lines()
-            .skip_while(|l| !l.starts_with(&inicio))
+            .skip_while(|l| !contem(l))
             .find_map(|l| l.strip_prefix("VmFlags:"))
-            .unwrap()
+            .unwrap_or_else(|| panic!("nenhum mapeamento contém {endereco:x}"))
             .split_whitespace()
             .map(str::to_string)
             .collect()
