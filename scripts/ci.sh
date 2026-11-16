@@ -10,7 +10,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 # Numa variável, para que uma falha do script pare o CI (`eval "$(...)"` a engole).
 remoteid=$(scripts/remoteid.sh)
 eval "$remoteid"
-cargo test --workspace --locked
+# Os do SoftHSM2 (driver GD Burti) ficam com o script deles, que usa um
+# container quando o host não tem o pacote.
+cargo test --workspace --locked --exclude driver-gd-burti
+cargo test --locked -p driver-gd-burti --bins --test gdburti_virtual
+scripts/softhsm.sh
 # De novo os do lançador, com a saída à mostra: o nível do Landlock que o
 # kernel aplicou fica no log, e um teste pulado por falta de ABI aparece.
 cargo test --locked -p servidor --test isolar -- --nocapture --test-threads 1

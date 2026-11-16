@@ -28,6 +28,11 @@ eval "$(scripts/remoteid.sh)"
 cargo test --workspace
 ```
 
+Os do driver GD Burti usam o SoftHSM2 no lugar do módulo do SafeSign, pelo
+`scripts/softhsm.sh`: no host, se ele tiver o pacote `softhsm2`; senão, num
+container. O [README do driver](../drivers/gd-burti/README.md) tem também o
+teste com o cartão virtual do gdburti-rs, que fica fora do CI.
+
 Sem `REMOTEID_LINUX_DIR`, o script clona o RemoteID-linux na revisão fixada
 dentro de `target/deps/`. Com ele, usa a cópia apontada, para testar uma
 mudança no RemoteID-linux antes de ela ser publicada.

@@ -357,6 +357,47 @@ crate: o servidor não carrega o RemoteID.
 - A Certisign não assina RSA-PSS: o driver não declara `CKM_RSA_PKCS_PSS`, e o
   token virtual não se anuncia para TLS 1.3.
 
+## Driver GD Burti
+
+`drivers/gd-burti`, binário `remote-certificate-driver-gd-burti`, sobre o
+módulo PKCS#11 oficial do SafeSign IC (`libaetpkss.so`, A.E.T. Europe). Como
+rodar e testar está no [README do driver](../drivers/gd-burti/README.md).
+
+- **Imagem**: `drivers/gd-burti/Dockerfile` baixa o SafeSign 4.5.0.0 do link
+  oficial (o mesmo pacote e o mesmo SHA-256 da receita do Tessera), desempacota
+  só os arquivos com `dpkg-deb -x` e põe em `/usr/lib` o módulo, a
+  `libaetjcss` (que ele carrega pelo nome) e a `libaetdlss`, e em
+  `/usr/share/safesign` os dados do cartão. As dependências (GDBM, cliente
+  PC/SC, OpenSSL 3) vêm do Debian. O Token Administration, gráfico, fica de
+  fora. O manifesto pede só o socket do `pcscd` do host
+  (`/run/pcscd/pcscd.comm`), que o compose monta no container; rede, nenhuma.
+- **Configuração**: a série do token (vazia, vale o único conectado) e o PIN.
+  O driver confere o PIN no token antes de aceitar e grava só a série no
+  diretório de estado; o PIN o servidor guarda, como o fator `pin`.
+- **Fatores**: só o PIN do token, `guardado`.
+- **Mecanismos**: os que o token lista com `CKF_SIGN`, dentro dos do
+  contrato, pelo tipo da chave do certificado: `CKM_RSA_PKCS`,
+  `CKM_SHA{256,384,512}_RSA_PKCS` e `CKM_RSA_PKCS_PSS` numa chave RSA,
+  `CKM_ECDSA` numa EC. No RSA-PSS o hash vem pronto, e o driver deduz o
+  algoritmo pelo tamanho (32, 48 ou 64 bytes), com MGF1 do mesmo hash e sal do
+  tamanho do hash, como no TLS 1.3.
+- **Manias do SafeSign**: as chaves privadas só aparecem depois do login, por
+  isso o `listar` parte dos certificados e liga cada um à chave pelo `CKA_ID`,
+  deixando de fora os certificados de AC da cadeia; o módulo grava em
+  `$HOME/.safesign`, por isso o driver se executa de novo com o `HOME` no
+  diretório de estado do token; sem leitor no PC/SC, o `C_GetSlotList` falha
+  com `CKR_FUNCTION_FAILED` em vez de devolver a lista vazia, e o driver
+  responde `token_ausente`.
+- **Erros**: PIN incorreto vira `fator_recusado`, sem nova tentativa; PIN
+  travado (`CKR_PIN_LOCKED`, ou o token já marcado como travado, que o driver
+  confere antes de pedir o PIN) vira `bloqueado`; token removido,
+  `token_ausente`.
+- **Validado sem token físico**: com o SoftHSM2 (CI) e com o cartão virtual
+  do gdburti-rs, que fala os APDUs do applet da GD Burti (fora do CI). Dentro
+  da imagem e isolado, o driver chega ao `pcscd` do host, que o recusa pelo
+  polkit até o host ter uma regra para o uid do container (README do
+  driver). Falta essa regra e o token real.
+
 ## Novos drivers
 
 Não há driver PKCS#11 genérico, e o projeto não declara suporte genérico a

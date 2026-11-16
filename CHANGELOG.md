@@ -20,6 +20,16 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   Exige o `remoteid` 0.5.1 ou mais novo e avisa quando o instalado é anterior.
   Testado com o 0.5.2, que fecha a memória do `remoteid` para outros
   processos; é o recomendado.
+- Driver da GD Burti (`remote-certificate-driver-gd-burti`), sobre o módulo
+  PKCS#11 oficial do SafeSign IC, com a imagem derivada que baixa o SafeSign
+  do link oficial conferido pelo SHA-256. Declara os mecanismos que o token
+  assina (`CKM_RSA_PKCS`, `CKM_SHA256_RSA_PKCS`, `CKM_SHA384_RSA_PKCS`,
+  `CKM_SHA512_RSA_PKCS` e `CKM_RSA_PKCS_PSS` numa chave RSA, `CKM_ECDSA` numa
+  EC), escolhe o token pela série quando há mais de um e confere o PIN ao
+  configurar. PIN recusado volta como `fator_recusado`, sem nova tentativa, e
+  PIN travado como `bloqueado`, sem gastar tentativa. O manifesto pede só o
+  socket do `pcscd` do host. Validado com o SoftHSM2 e com o cartão virtual
+  do gdburti-rs; falta o token físico.
 - O servidor responde os fatores guardados (PIN e senha) sem que ninguém os
   conheça, e para o token, sem nova tentativa, quando o token recusa um deles,
   mesmo que o token peça junto um fator da pessoa. O token parado continua

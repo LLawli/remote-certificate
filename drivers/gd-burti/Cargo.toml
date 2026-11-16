@@ -1,0 +1,28 @@
+[package]
+name = "driver-gd-burti"
+description = "Driver dos tokens A3 GD Burti, sobre o módulo PKCS#11 do SafeSign IC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "remote-certificate-driver-gd-burti"
+path = "src/main.rs"
+
+[dependencies]
+cryptoki = "0.12"
+protocolo.workspace = true
+rustix = { version = "1", features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+x509-parser = "0.18"
+
+[dev-dependencies]
+base64.workspace = true
+rcgen = { version = "0.14", default-features = false }
+ring = "0.17"
+
+[lints]
+workspace = true
