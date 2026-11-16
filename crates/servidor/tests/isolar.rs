@@ -8,6 +8,7 @@
 
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -144,6 +145,51 @@ fn o_driver_so_conecta_nas_portas_do_manifesto() {
         com_landlock(&saida, 4).unwrap(),
         "declarada:nao\noutra:nao\n"
     );
+}
+
+#[test]
+fn o_driver_so_conecta_nos_sockets_unix_do_manifesto() {
+    // Os sockets ficam fora do estado (lá o driver pode tudo), como o do
+    // `pcscd`. Antes da ABI 9 o Landlock não filtra socket UNIX.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("isolar-unix-sockets");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let declarado = dir.join("declarado.sock");
+    let outro = dir.join("outro.sock");
+    let _ouvindo = [&declarado, &outro].map(|s| UnixListener::bind(s).unwrap());
+    let conectar = |s: &PathBuf| {
+        format!(
+            "python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' {}",
+            s.display()
+        )
+    };
+    let script = [
+        tenta("declarado", &conectar(&declarado)),
+        tenta("outro", &conectar(&outro)),
+    ]
+    .concat();
+    let manifesto = format!(r#"{{"unix": ["{}"]}}"#, declarado.display());
+
+    let saida = Isolado::novo("unix", &script, Some(&manifesto)).rodar();
+    let Some(stdout) = com_landlock(&saida, 9) else {
+        return;
+    };
+    assert_eq!(stdout, "declarado:sim\noutro:nao\n");
+
+    // Sem manifesto, nenhum.
+    let saida = Isolado::novo("sem-unix", &script, None).rodar();
+    assert_eq!(
+        com_landlock(&saida, 9).unwrap(),
+        "declarado:nao\noutro:nao\n"
+    );
+}
+
+#[test]
+fn manifesto_com_uma_pasta_de_sockets_nao_deixa_o_driver_subir() {
+    let isolado = Isolado::novo("unix-pasta", "echo subiu", Some(r#"{"unix": ["/run"]}"#));
+    let saida = isolado.rodar();
+    assert!(!saida.status.success(), "{saida:?}");
+    assert!(saida.stdout.is_empty());
 }
 
 #[test]

@@ -32,10 +32,14 @@ O que o driver precisa além do sistema fica num JSON ao lado do executável,
 com o nome dele mais `.manifesto.json`, instalado pelo Dockerfile do driver:
 
 ```json
-{"tcp": [443], "memoria_mib": 512}
+{"tcp": [443], "unix": ["/run/pcscd/pcscd.comm"], "memoria_mib": 512}
 ```
 
 - `tcp`: as portas em que ele conecta. Sem manifesto, nenhuma.
+- `unix`: os sockets UNIX em que ele conecta, por caminho absoluto. Um token
+  físico pede o do `pcscd` para falar com o leitor. Cada entrada é um socket,
+  nunca uma pasta: um manifesto com uma pasta não deixa o driver subir. Um
+  socket que não existe não impede o driver de subir.
 - `memoria_mib`: o teto de memória virtual de cada processo (padrão 1024).
 
 Campo desconhecido é recusado, e o driver não sobe.

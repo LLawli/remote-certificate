@@ -117,8 +117,9 @@ Todas as mudanças visíveis deste projeto. O formato segue o
 - Cada token tem o seu diretório de estado (`/dados/drivers/<id>`, opção
   `--estados`), que é o diretório de trabalho do driver. O driver RemoteID não
   precisa mais de `--estado`.
-- O manifesto do driver (`<driver>.manifesto.json`): as portas TCP e o teto de
-  memória.
+- O manifesto do driver (`<driver>.manifesto.json`): as portas TCP, os
+  sockets UNIX (o do `pcscd`, para um token físico) e o teto de memória. Sem
+  um socket no manifesto, o driver não conecta em nenhum.
 - O container tem nome de máquina fixo (o RemoteID registra a instalação com
   ele) e um teto de 1024 processos.
 - `drivers/remoteid/conferir-imagem.sh`: a imagem no compose de produção, com

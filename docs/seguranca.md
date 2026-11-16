@@ -147,9 +147,10 @@ valem para os filhos do driver (o `remoteid`):
   diretório de estado do token, onde não executa nada. Não alcança o banco, o
   secret nem o estado de outro token.
 - **Rede**: só conecta nas portas TCP do manifesto (o RemoteID, na 443) e não
-  escuta em nenhuma (ABI 4). Não conecta em socket UNIX nenhum (ABI 9) nem em
-  socket abstrato de fora, e não manda sinal para fora dele, nem para o
-  servidor (ABI 6).
+  escuta em nenhuma (ABI 4). Só conecta nos sockets UNIX do manifesto, um a
+  um e nunca uma pasta inteira (ABI 9; o do `pcscd`, para um token físico),
+  não conecta em socket abstrato de fora e não manda sinal para fora dele,
+  nem para o servidor (ABI 6).
 - **Limites**: `RLIMIT_CORE 0`, memória virtual (512 MiB no RemoteID, que
   sobe com 128), 256 arquivos abertos; um teto menor que o ambiente já impôs
   fica como está (o lançador só baixa limites). O número de processos é o

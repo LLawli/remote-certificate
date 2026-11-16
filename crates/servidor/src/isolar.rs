@@ -7,8 +7,9 @@
 //! - **Landlock**: o driver lê e executa o sistema (`/usr`, `/lib`, `/etc`) e
 //!   a pasta do próprio executável, e escreve só no diretório de trabalho, que
 //!   o servidor faz ser o diretório de estado do token. Só conecta nas portas
-//!   TCP do manifesto, não escuta em porta nenhuma, não conecta em socket
-//!   UNIX nem manda sinal para fora dele.
+//!   TCP do manifesto, não escuta em porta nenhuma, só conecta nos sockets
+//!   UNIX do manifesto (o do `pcscd`, para um token físico) e não manda sinal
+//!   para fora dele.
 //! - **Limites**: sem core dump, com teto de memória e de arquivos abertos.
 //!
 //! O que o driver precisa vem do manifesto ao lado do executável
@@ -58,6 +59,11 @@ pub struct Manifesto {
     /// As portas TCP em que o driver conecta (o RemoteID, na 443).
     #[serde(default)]
     pub tcp: Vec<u16>,
+    /// Os sockets UNIX em que o driver conecta, por caminho absoluto (o do
+    /// `pcscd`, para falar com um leitor de smartcard). Cada um é um socket,
+    /// nunca uma pasta.
+    #[serde(default)]
+    pub unix: Vec<PathBuf>,
     /// Teto de memória virtual de cada processo, em MiB.
     #[serde(default)]
     pub memoria_mib: Option<u64>,
@@ -74,11 +80,34 @@ impl Manifesto {
 
     /// O manifesto do driver; sem arquivo, o padrão (sem rede).
     pub fn ler(driver: &Path) -> io::Result<Manifesto> {
-        match std::fs::read(Manifesto::caminho(driver)) {
-            Ok(conteudo) => serde_json::from_slice(&conteudo).map_err(io::Error::other),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Manifesto::default()),
-            Err(e) => Err(e),
+        let manifesto: Manifesto = match std::fs::read(Manifesto::caminho(driver)) {
+            Ok(conteudo) => serde_json::from_slice(&conteudo).map_err(io::Error::other)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Manifesto::default()),
+            Err(e) => return Err(e),
+        };
+        manifesto.conferir()?;
+        Ok(manifesto)
+    }
+
+    /// Um socket do manifesto é um caminho absoluto e não é uma pasta: numa
+    /// pasta, a regra valeria para todo socket dentro dela. Um socket que não
+    /// existe (o `pcscd` fora do ar) não impede o driver de subir.
+    fn conferir(&self) -> io::Result<()> {
+        for socket in &self.unix {
+            if !socket.is_absolute() {
+                return Err(io::Error::other(format!(
+                    "manifesto: o socket {} não é um caminho absoluto",
+                    socket.display()
+                )));
+            }
+            if socket.is_dir() {
+                return Err(io::Error::other(format!(
+                    "manifesto: {} é uma pasta, não um socket",
+                    socket.display()
+                )));
+            }
         }
+        Ok(())
     }
 }
 
@@ -130,6 +159,7 @@ pub fn restringir(
             ))
         })
         .and_then(|r| r.add_rules(path_beneath_rules([estado], tudo & !AccessFs::Execute)))
+        .and_then(|r| r.add_rules(path_beneath_rules(&manifesto.unix, AccessFs::ResolveUnix)))
         .map_err(io::Error::other)?;
     for porta in &manifesto.tcp {
         regras = regras
@@ -197,7 +227,10 @@ pub fn executar(args: &[OsString]) -> io::Error {
         }
         let nivel = restringir(&pasta, &estado, &manifesto)?;
         let nome = driver.file_name().unwrap_or_default().to_string_lossy();
-        eprintln!("isolar: {nome}: {nivel}; TCP {:?}", manifesto.tcp);
+        eprintln!(
+            "isolar: {nome}: {nivel}; TCP {:?}; UNIX {:?}",
+            manifesto.tcp, manifesto.unix
+        );
         Ok::<_, io::Error>(driver)
     })();
     match preparado {
@@ -223,6 +256,16 @@ mod testes {
         let manifesto = Manifesto::ler(Path::new("/nao/existe/driver")).unwrap();
         assert_eq!(manifesto, Manifesto::default());
         assert!(manifesto.tcp.is_empty());
+    }
+
+    #[test]
+    fn socket_do_manifesto_e_um_caminho_absoluto_e_nao_uma_pasta() {
+        let ler = |json: &str| serde_json::from_str::<Manifesto>(json).unwrap().conferir();
+        assert!(ler(r#"{"unix": ["/run/pcscd/pcscd.comm"]}"#).is_ok());
+        assert!(ler(r#"{"unix": ["/nao/existe.sock"]}"#).is_ok());
+        assert!(ler(r#"{"unix": ["run/pcscd/pcscd.comm"]}"#).is_err());
+        assert!(ler(r#"{"unix": ["/run"]}"#).is_err());
+        assert!(ler(r#"{"unix": ["/"]}"#).is_err());
     }
 
     #[test]
