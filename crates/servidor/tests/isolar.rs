@@ -53,6 +53,8 @@ impl Isolado {
 /// lançador pede a 9 e aplica o que o kernel tiver.
 fn com_landlock(saida: &Output, abi_minima: u32) -> Option<String> {
     let log = String::from_utf8_lossy(&saida.stderr);
+    // Com `--nocapture` (o `scripts/ci.sh` roda assim), o nível vai para o log.
+    eprintln!("{}", log.lines().next().unwrap_or_default());
     if log.contains("sem Landlock") {
         eprintln!("kernel sem Landlock: nada a conferir ({log})");
         return None;
@@ -174,6 +176,28 @@ fn o_driver_roda_sem_core_e_com_tetos() {
     )
     .rodar();
     assert_eq!(String::from_utf8_lossy(&saida.stdout), "0 524288 256\n");
+}
+
+/// Um teto que o ambiente já impôs, menor que o do lançador, fica como está:
+/// o lançador só baixa os limites, e o driver sobe do mesmo jeito.
+#[test]
+fn com_tetos_menores_o_driver_sobe_com_eles() {
+    let isolado = Isolado::novo(
+        "tetos-menores",
+        "echo $(ulimit -c) $(ulimit -v) $(ulimit -n)",
+        None,
+    );
+    let driver = isolado.dir.join("drivers/driver");
+    let saida = Command::new("bash")
+        .arg("-c")
+        .arg(r#"ulimit -n 128 -v 600000 && exec "$0" isolar -- "$1""#)
+        .arg(LANCADOR)
+        .arg(&driver)
+        .current_dir(isolado.dir.join("estado"))
+        .output()
+        .unwrap();
+    assert!(saida.status.success(), "{saida:?}");
+    assert_eq!(String::from_utf8_lossy(&saida.stdout), "0 600000 128\n");
 }
 
 #[test]

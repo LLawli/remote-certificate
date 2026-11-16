@@ -106,7 +106,9 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   Landlock, sem privilégio nenhum. O driver lê o sistema e a própria pasta,
   escreve só no estado do token (onde não executa nada), conecta só nas portas
   TCP do manifesto e não manda sinal para fora; roda sem core dump, com teto de
-  memória e de arquivos abertos. O log diz o nível que o kernel aplicou.
+  memória e de arquivos abertos. O log diz o nível que o kernel aplicou. Num
+  kernel sem Landlock o driver sobe do mesmo jeito, e um teto que o ambiente
+  já impôs, menor, fica como está.
 - Cada token tem o seu diretório de estado (`/dados/drivers/<id>`, opção
   `--estados`), que é o diretório de trabalho do driver. O driver RemoteID não
   precisa mais de `--estado`.

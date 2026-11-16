@@ -148,14 +148,25 @@ pub fn restringir(
 }
 
 fn limitar(manifesto: &Manifesto) -> io::Result<()> {
-    let teto = |valor| Rlimit {
-        current: Some(valor),
-        maximum: Some(valor),
-    };
     let memoria = manifesto.memoria_mib.unwrap_or(MEMORIA_PADRAO_MIB) * 1024 * 1024;
-    rustix::process::setrlimit(Resource::Core, teto(0))?;
-    rustix::process::setrlimit(Resource::As, teto(memoria))?;
-    rustix::process::setrlimit(Resource::Nofile, teto(ARQUIVOS_ABERTOS))?;
+    baixar(Resource::Core, 0)?;
+    baixar(Resource::As, memoria)?;
+    baixar(Resource::Nofile, ARQUIVOS_ABERTOS)?;
+    Ok(())
+}
+
+/// Põe o limite em `valor`, ou no teto que o ambiente já impôs, se for menor:
+/// sem privilégio, subir um teto falha, e o driver não subiria.
+fn baixar(recurso: Resource, valor: u64) -> io::Result<()> {
+    let maximo = rustix::process::getrlimit(recurso).maximum;
+    let valor = maximo.map_or(valor, |maximo| maximo.min(valor));
+    rustix::process::setrlimit(
+        recurso,
+        Rlimit {
+            current: Some(valor),
+            maximum: Some(valor),
+        },
+    )?;
     Ok(())
 }
 

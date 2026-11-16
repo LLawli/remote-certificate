@@ -11,6 +11,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 remoteid=$(scripts/remoteid.sh)
 eval "$remoteid"
 cargo test --workspace --locked
+# De novo os do lançador, com a saída à mostra: o nível do Landlock que o
+# kernel aplicou fica no log, e um teste pulado por falta de ABI aparece.
+cargo test --locked -p servidor --test isolar -- --nocapture --test-threads 1
 cargo audit --deny warnings
 shellcheck -x scripts/*.sh bin/* drivers/*/*.sh
 actionlint

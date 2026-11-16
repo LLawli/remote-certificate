@@ -151,7 +151,8 @@ valem para os filhos do driver (o `remoteid`):
   socket abstrato de fora, e não manda sinal para fora dele, nem para o
   servidor (ABI 6).
 - **Limites**: `RLIMIT_CORE 0`, memória virtual (512 MiB no RemoteID, que
-  sobe com 128), 256 arquivos abertos. O número de processos é o
+  sobe com 128), 256 arquivos abertos; um teto menor que o ambiente já impôs
+  fica como está (o lançador só baixa limites). O número de processos é o
   `pids_limit` do container: o `RLIMIT_NPROC` conta as threads do servidor
   junto, que roda com o mesmo usuário.
 - O que o driver precisa vem do manifesto ao lado do executável
@@ -227,8 +228,10 @@ valem para os filhos do driver (o `remoteid`):
   pode sobreviver no disco. Por isso nada é gravado em claro, nem uma vez.
 - **Captura de tela**: na estação, um programa do mesmo usuário pode capturar a
   janela onde a pessoa digita o OTP. O OTP é de uso único e expira rápido.
-- **Limites do Landlock** dependem do kernel do host; num kernel antigo, o
-  driver fica só com os limites de processo. O log de cada partida do driver
-  diz o nível (`isolar: ...: Landlock completo (ABI 9)`).
+- **O Landlock é um reforço, não um requisito**: depende do kernel do host, e
+  sem ele (ou com uma ABI antiga) o driver sobe do mesmo jeito, com o que o
+  kernel tiver e os limites de processo. O serviço nunca deixa de funcionar
+  por falta dele. O log de cada partida do driver diz o nível
+  (`isolar: ...: Landlock completo (ABI 9)`, ou `sem Landlock`).
 - **A rede do Landlock filtra portas, não destinos**: o driver do RemoteID
   alcança qualquer servidor na 443, não só a Certisign.
