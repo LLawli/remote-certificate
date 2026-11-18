@@ -52,9 +52,12 @@ Os de integração sobem o driver e conversam com ele pelo contrato, assinando
 com cada mecanismo que ele declara e conferindo a assinatura com o
 certificado.
 
-- **SoftHSM2** (`tests/softhsm.rs`, roda no CI): com o pacote `softhsm2` no
-  host, roda nele; sem, num container Debian com o pacote. `SOFTHSM2_MODULE`
-  aponta o `.so` do host se ele não estiver num dos caminhos de sempre.
+- **SoftHSM2** (`tests/softhsm.rs` e `tests/pkcs11.rs`, rodam no CI): o
+  primeiro com o driver sozinho; o segundo com o servidor, o agente e a face
+  PKCS#11 da estação juntos, pedindo o RSA-PSS e o ECDSA do TLS 1.3 como o
+  NSS pede. Com o pacote `softhsm2` no host, rodam nele; sem, num container
+  Debian com o pacote. `SOFTHSM2_MODULE` aponta o `.so` do host se ele não
+  estiver num dos caminhos de sempre.
 
   ```sh
   scripts/softhsm.sh

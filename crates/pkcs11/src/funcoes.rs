@@ -16,7 +16,7 @@ use rsa::Pkcs1v15Encrypt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::objetos::Objeto;
+use crate::objetos::{Objeto, Publica};
 use crate::slots::{self, Slot};
 use crate::{Login, MODULO, Modulo, Operacao, SituacaoDoPin, canal, entrada, registro, trava};
 
@@ -309,15 +309,13 @@ pub(crate) unsafe extern "C" fn C_GetMechanismInfo(
     pInfo: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
     entrada!("C_GetMechanismInfo", {"slot": slotID, "mecanismo": registro::mecanismo(type_)}, {
-        let (mecanismos, (minimo, maximo)) = match com_o_slot(slotID, |_, s| (s.mecanismos(), s.bits())) {
-            Ok(r) => r,
-            Err(rv) => return rv,
-        };
         // Só o que alguma chave do slot declara: o cliente nunca expõe um
         // mecanismo que o driver não declarou.
-        if !mecanismos.contains(&type_) {
-            return CKR_MECHANISM_INVALID;
-        }
+        let (minimo, maximo) = match com_o_slot(slotID, |_, s| s.bits(type_)) {
+            Ok(Some(bits)) => bits,
+            Ok(None) => return CKR_MECHANISM_INVALID,
+            Err(rv) => return rv,
+        };
         if pInfo.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
@@ -328,10 +326,14 @@ pub(crate) unsafe extern "C" fn C_GetMechanismInfo(
         // signer4j do PJeOffice cai num provedor de software e não autentica.
         // Com a chave privada ele vira C_SignInit e C_Sign; o C_Encrypt de
         // verdade só cifra com a pública.
-        let flags = if type_ == CKM_RSA_PKCS {
-            CKF_SIGN | CKF_ENCRYPT
-        } else {
-            CKF_SIGN
+        //
+        // No ECDSA, as capacidades EC que a especificação pede que o token
+        // diga: curva sobre campo primo, dada pelo nome, e ponto não
+        // comprimido, que é o que a face mostra.
+        let flags = match type_ {
+            CKM_RSA_PKCS => CKF_SIGN | CKF_ENCRYPT,
+            CKM_ECDSA => CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS,
+            _ => CKF_SIGN,
         };
         *pInfo = CK_MECHANISM_INFO {
             ulMinKeySize: minimo,
@@ -701,15 +703,41 @@ fn rv_da_falha(tipo: TipoDeFalha) -> CK_RV {
     }
 }
 
-/// O mecanismo pedido, e se veio com parâmetro. Nenhum dos que a face expõe
-/// tem; um parâmetro é sinal de que o hospedeiro queria PSS ou OAEP.
-unsafe fn ler_mecanismo(pMechanism: *mut CK_MECHANISM) -> Result<(CK_MECHANISM_TYPE, bool), CK_RV> {
+/// O mecanismo pedido e o parâmetro que veio com ele.
+struct Pedido {
+    tipo: CK_MECHANISM_TYPE,
+    com_parametro: bool,
+    /// Os parâmetros, quando vieram no formato dos do RSA-PSS.
+    pss: Option<CK_RSA_PKCS_PSS_PARAMS>,
+}
+
+unsafe fn ler_mecanismo(pMechanism: *mut CK_MECHANISM) -> Result<Pedido, CK_RV> {
     if pMechanism.is_null() {
         return Err(CKR_ARGUMENTS_BAD);
     }
     let mecanismo = &*pMechanism;
-    let com_parametro = mecanismo.ulParameterLen != 0 || !mecanismo.pParameter.is_null();
-    Ok((mecanismo.mechanism, com_parametro))
+    let pss = (mecanismo.ulParameterLen as usize == size_of::<CK_RSA_PKCS_PSS_PARAMS>()
+        && !mecanismo.pParameter.is_null())
+    .then(|| std::ptr::read_unaligned(mecanismo.pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>()));
+    Ok(Pedido {
+        tipo: mecanismo.mechanism,
+        com_parametro: mecanismo.ulParameterLen != 0 || !mecanismo.pParameter.is_null(),
+        pss,
+    })
+}
+
+/// O tamanho do hash que os parâmetros do RSA-PSS combinam, se são os que o
+/// contrato assina: SHA-256, SHA-384 ou SHA-512, o MGF1 com o mesmo hash e
+/// o sal do tamanho dele, como no TLS 1.3. O driver deduz o hash pelo
+/// tamanho, então outra combinação daria uma assinatura que não confere.
+fn hash_do_pss(parametros: &CK_RSA_PKCS_PSS_PARAMS) -> Option<usize> {
+    let (mgf, bytes) = match parametros.hashAlg {
+        CKM_SHA256 => (CKG_MGF1_SHA256, 32),
+        CKM_SHA384 => (CKG_MGF1_SHA384, 48),
+        CKM_SHA512 => (CKG_MGF1_SHA512, 64),
+        _ => return None,
+    };
+    (parametros.mgf == mgf && parametros.sLen == bytes as CK_ULONG).then_some(bytes)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -732,10 +760,11 @@ unsafe fn iniciar(
     let Some(slot) = modulo.slot_da_sessao(hSession) else {
         return CKR_SESSION_HANDLE_INVALID;
     };
-    let (mecanismo, com_parametro) = match ler_mecanismo(pMechanism) {
-        Ok(m) => m,
+    let pedido = match ler_mecanismo(pMechanism) {
+        Ok(pedido) => pedido,
         Err(rv) => return rv,
     };
+    let mecanismo = pedido.tipo;
     let chave = match uso {
         Uso::Assinar => slot.da_privada(hKey),
         Uso::Cifrar => slot.da_publica(hKey),
@@ -752,14 +781,19 @@ unsafe fn iniciar(
         Uso::Cifrar => mecanismo == CKM_RSA_PKCS && chave.mecanismos.contains(&CKM_RSA_PKCS),
     };
     // Primeiro se o mecanismo existe: um RSA-PSS pedido com os parâmetros
-    // dele é "não suportado" (o token não serve para TLS 1.3), não
-    // "parâmetro errado".
+    // dele, a uma chave que não o declara, é "não suportado" (o token não
+    // serve para TLS 1.3), não "parâmetro errado".
     if !permitido {
         return CKR_MECHANISM_INVALID;
     }
-    if com_parametro {
-        return CKR_MECHANISM_PARAM_INVALID;
-    }
+    // Só o RSA-PSS tem parâmetro, e ele é obrigatório. Nos outros, um
+    // parâmetro é sinal de que o hospedeiro queria outra coisa (OAEP).
+    let hash_do_pss = match (mecanismo, pedido.pss.as_ref().and_then(hash_do_pss)) {
+        (CKM_RSA_PKCS_PSS, Some(bytes)) => Some(bytes),
+        (CKM_RSA_PKCS_PSS, None) => return CKR_MECHANISM_PARAM_INVALID,
+        _ if pedido.com_parametro => return CKR_MECHANISM_PARAM_INVALID,
+        _ => None,
+    };
     // Cifrar com a pública não precisa do login; assinar precisa.
     if uso == Uso::Assinar && !logado {
         return CKR_USER_NOT_LOGGED_IN;
@@ -774,6 +808,7 @@ unsafe fn iniciar(
     }
     *ativa = Some(Operacao {
         mecanismo,
+        hash_do_pss,
         chave: hKey,
         acumulado: Vec::new(),
     });
@@ -831,8 +866,9 @@ unsafe fn entregar(
     pSaida: *mut CK_BYTE,
     pulSaidaLen: *mut CK_ULONG,
 ) -> CK_RV {
-    // Toda assinatura e cifra RSA tem o tamanho do módulo; outra coisa é
-    // defeito, e o hospedeiro a recusaria adiante.
+    // Toda assinatura tem o tamanho da chave (o módulo no RSA, o `r‖s` no
+    // EC), e toda cifra o do módulo; outra coisa é defeito, e o hospedeiro a
+    // recusaria adiante.
     if bloco.len() != bytes {
         return CKR_FUNCTION_FAILED;
     }
@@ -841,12 +877,28 @@ unsafe fn entregar(
     CKR_OK
 }
 
-/// O que cabe num `CKM_RSA_PKCS`: um bloco (em geral um DigestInfo) que deixa
-/// espaço para o padding do PKCS#1 v1.5. Os outros levam o conteúdo, de
-/// qualquer tamanho até o limite do agente; quem resume é o driver.
-fn cabe(mecanismo: CK_MECHANISM_TYPE, dados: &[u8], bytes: usize) -> bool {
+/// O maior hash que o contrato conhece, o SHA-512.
+const MAIOR_HASH: usize = 64;
+
+/// O que cabe em cada mecanismo:
+///
+/// - `CKM_RSA_PKCS`: um bloco (em geral um DigestInfo) que deixa espaço para
+///   o padding do PKCS#1 v1.5;
+/// - `CKM_RSA_PKCS_PSS`: o hash que os parâmetros combinaram, do tamanho
+///   exato;
+/// - `CKM_ECDSA`: um hash, que o contrato não manda conteúdo ao ECDSA;
+/// - os outros: o conteúdo, de qualquer tamanho até o limite do agente; quem
+///   resume é o driver.
+fn cabe(
+    mecanismo: CK_MECHANISM_TYPE,
+    hash_do_pss: Option<usize>,
+    dados: &[u8],
+    bytes: usize,
+) -> bool {
     match mecanismo {
         CKM_RSA_PKCS => !dados.is_empty() && dados.len() <= bytes.saturating_sub(11),
+        CKM_RSA_PKCS_PSS => hash_do_pss == Some(dados.len()),
+        CKM_ECDSA => (1..=MAIOR_HASH).contains(&dados.len()),
         _ => dados.len() <= LIMITE_DOS_DADOS,
     }
 }
@@ -874,7 +926,11 @@ unsafe fn assinar_e_entregar(
         };
         let alvo = modulo.slot(sessao.slot).and_then(|slot| {
             let chave = slot.da_privada(operacao.chave)?;
-            Some((slot.token.clone()?, chave.id.clone(), chave.bytes()))
+            Some((
+                slot.token.clone()?,
+                chave.id.clone(),
+                chave.publica.bytes_da_assinatura(),
+            ))
         });
         let Some((token, chave, bytes)) = alvo else {
             modulo
@@ -903,7 +959,7 @@ unsafe fn assinar_e_entregar(
     let mut bloco = registro::impressao(dados);
     bloco["mecanismo"] = registro::mecanismo(operacao.mecanismo).into();
     registro::evento("bloco", bloco);
-    if !cabe(operacao.mecanismo, dados, bytes) {
+    if !cabe(operacao.mecanismo, operacao.hash_do_pss, dados, bytes) {
         return CKR_DATA_LEN_RANGE;
     }
     let Some(mecanismo) = slots::do_contrato(operacao.mecanismo) else {
@@ -1038,7 +1094,10 @@ pub(crate) unsafe extern "C" fn C_Encrypt(
         let Some(publica) = modulo
             .slot(sessao.slot)
             .and_then(|s| s.da_publica(operacao.chave))
-            .map(|c| c.publica.clone())
+            .and_then(|c| match &c.publica {
+                Publica::Rsa(publica) => Some(publica.clone()),
+                Publica::Ec { .. } => None,
+            })
         else {
             return CKR_KEY_HANDLE_INVALID;
         };
@@ -1048,7 +1107,7 @@ pub(crate) unsafe extern "C" fn C_Encrypt(
         }
         modulo.sessoes.get_mut(&hSession).expect("conferida").cifra = None;
         let dados = match bloco_do_host(pData, ulDataLen) {
-            Ok(d) if cabe(CKM_RSA_PKCS, d, bytes) => d,
+            Ok(d) if cabe(CKM_RSA_PKCS, None, d, bytes) => d,
             Ok(_) => return CKR_DATA_LEN_RANGE,
             Err(rv) => return rv,
         };
@@ -1080,17 +1139,54 @@ mod testes {
 
     #[test]
     fn o_rsa_pkcs_cabe_no_bloco_e_os_outros_no_limite() {
-        assert!(cabe(CKM_RSA_PKCS, &[0x30; 51], 256));
-        assert!(cabe(CKM_RSA_PKCS, &[0; 245], 256));
-        assert!(!cabe(CKM_RSA_PKCS, &[0; 246], 256), "teto do PKCS#1 v1.5");
-        assert!(!cabe(CKM_RSA_PKCS, &[], 256));
-        assert!(cabe(CKM_SHA256_RSA_PKCS, &[], 256));
-        assert!(cabe(CKM_SHA256_RSA_PKCS, &vec![0; LIMITE_DOS_DADOS], 256));
+        assert!(cabe(CKM_RSA_PKCS, None, &[0x30; 51], 256));
+        assert!(cabe(CKM_RSA_PKCS, None, &[0; 245], 256));
+        assert!(
+            !cabe(CKM_RSA_PKCS, None, &[0; 246], 256),
+            "teto do PKCS#1 v1.5"
+        );
+        assert!(!cabe(CKM_RSA_PKCS, None, &[], 256));
+        assert!(cabe(CKM_SHA256_RSA_PKCS, None, &[], 256));
+        assert!(cabe(
+            CKM_SHA256_RSA_PKCS,
+            None,
+            &vec![0; LIMITE_DOS_DADOS],
+            256
+        ));
         assert!(!cabe(
             CKM_SHA256_RSA_PKCS,
+            None,
             &vec![0; LIMITE_DOS_DADOS + 1],
             256
         ));
+    }
+
+    #[test]
+    fn o_pss_e_o_ecdsa_recebem_um_hash() {
+        assert!(cabe(CKM_RSA_PKCS_PSS, Some(32), &[0; 32], 256));
+        assert!(
+            !cabe(CKM_RSA_PKCS_PSS, Some(48), &[0; 32], 256),
+            "o hash dos parâmetros, não outro"
+        );
+        assert!(cabe(CKM_ECDSA, None, &[0; 32], 64));
+        assert!(cabe(CKM_ECDSA, None, &[0; 64], 64));
+        assert!(!cabe(CKM_ECDSA, None, &[], 64));
+        assert!(
+            !cabe(CKM_ECDSA, None, &[0; 65], 64),
+            "o conteúdo não vai ao ECDSA"
+        );
+    }
+
+    #[test]
+    fn so_os_parametros_pss_do_contrato_sao_aceitos() {
+        let pss = |hashAlg, mgf, sLen| CK_RSA_PKCS_PSS_PARAMS { hashAlg, mgf, sLen };
+        assert_eq!(hash_do_pss(&pss(CKM_SHA256, CKG_MGF1_SHA256, 32)), Some(32));
+        assert_eq!(hash_do_pss(&pss(CKM_SHA384, CKG_MGF1_SHA384, 48)), Some(48));
+        assert_eq!(hash_do_pss(&pss(CKM_SHA512, CKG_MGF1_SHA512, 64)), Some(64));
+        // O driver deduz o hash pelo tamanho e usa o mesmo no MGF1 e no sal.
+        assert_eq!(hash_do_pss(&pss(CKM_SHA256, CKG_MGF1_SHA1, 32)), None);
+        assert_eq!(hash_do_pss(&pss(CKM_SHA256, CKG_MGF1_SHA256, 0)), None);
+        assert_eq!(hash_do_pss(&pss(CKM_SHA_1, CKG_MGF1_SHA1, 20)), None);
     }
 
     #[test]

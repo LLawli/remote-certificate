@@ -27,5 +27,13 @@ serde_json.workspace = true
 sha2 = "0.11"
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 
+[features]
+# As chamadas de um hospedeiro, para os testes de integração dos drivers
+# (`hospedeiro`).
+hospedeiro = []
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+
 [lints]
 workspace = true

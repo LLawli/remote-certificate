@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Os testes do driver GD Burti com o SoftHSM2 no lugar do módulo do SafeSign.
+# Os testes do driver GD Burti com o SoftHSM2 no lugar do módulo do SafeSign:
+# o do driver sozinho e o da face PKCS#11 com o servidor e o agente.
 # Com o SoftHSM2 no host (o CI instala o pacote), rodam aqui mesmo; sem ele,
 # num container Debian com o pacote, sem instalar nada no host:
 #
@@ -10,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TESTE=(cargo test --locked -p driver-gd-burti --test softhsm)
+TESTE=(cargo test --locked -p driver-gd-burti --test softhsm --test pkcs11)
 
 modulo_no_host() {
     [[ -n ${SOFTHSM2_MODULE:-} ]] && return 0
@@ -33,7 +34,7 @@ imagem=remote-certificate-softhsm:teste
 docker build --quiet -t "$imagem" - >/dev/null <<'DOCKERFILE'
 FROM rust:1.92-slim-trixie
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends softhsm2 \
+    && apt-get install -y --no-install-recommends softhsm2 perl make \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 

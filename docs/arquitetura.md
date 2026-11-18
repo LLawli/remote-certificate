@@ -127,7 +127,8 @@ A face Linux é `crates/pkcs11` (`libremote_certificate_pkcs11.so`), portada
 do módulo PKCS#11 do RemoteID-linux:
 
 - Um slot por token do servidor, com o certificado, a chave privada e a
-  pública de cada chave RSA. A listagem vem do agente e vale 10 s; com a
+  pública de cada chave RSA ou EC (curvas P-256, P-384, P-521 e as Brainpool
+  da ICP-Brasil, pelo nome, com o ponto não comprimido). A listagem vem do agente e vale 10 s; com a
   conexão ocupada por uma assinatura, fica a anterior. Sem token nenhum
   (agente parado, computador não pareado), fica um slot com um token vazio:
   um módulo sem token deixa quem usa o crate `cryptoki` pelo RPC do p11-kit em
@@ -136,10 +137,14 @@ do módulo PKCS#11 do RemoteID-linux:
   servidor; o PIN errado aparece nos flags (`COUNT_LOW`, `FINAL_TRY`,
   `LOCKED`). Os objetos não são privados: aparecem antes do login, como num
   token físico.
-- Expõe só `CKM_RSA_PKCS` e `CKM_SHA{256,384,512}_RSA_PKCS`, e só os que a
-  chave declara. Os dados vão crus com o mecanismo, até uns 3 MiB: quem
-  resume é o driver. RSA-PSS e ECDSA ficam de fora, porque o contrato não
-  leva os parâmetros deles.
+- Expõe `CKM_RSA_PKCS`, `CKM_SHA{256,384,512}_RSA_PKCS`, `CKM_RSA_PKCS_PSS`
+  e `CKM_ECDSA`, só os que a chave declara e só os do tipo dela. Nos
+  `CKM_SHA*`, os dados vão crus, até uns 3 MiB: quem resume é o driver. No
+  RSA-PSS e no ECDSA vai o hash. A face só aceita os parâmetros de PSS que o
+  contrato assina (MGF1 com o mesmo hash, sal do tamanho dele, hash do
+  tamanho combinado) e recusa os outros no `C_SignInit`, antes de chegar ao
+  token: o driver deduz o hash pelo tamanho, e outra combinação daria uma
+  assinatura que não confere.
 - O `C_Sign` e o `C_Login` soltam a trava do módulo antes de ir ao agente: a
   janela do OTP aberta não congela a aplicação. Há `C_SignUpdate` e
   `C_SignFinal` (o BouncyCastle do PJeOffice só assina assim) e `C_Encrypt`

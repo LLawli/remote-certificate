@@ -146,6 +146,34 @@ ou o `p11-kit-proxy.so` do sistema onde o NSS lê o p11-kit. O SunPKCS11 assinou
 e cifrou com a chave privada (o caminho do PJeOffice) no Fedora 44, direto e
 pelo proxy.
 
+### TLS 1.3 (RSA-PSS e ECDSA)
+
+Um token cujo driver declara `CKM_RSA_PKCS_PSS` (numa chave RSA) ou
+`CKM_ECDSA` (numa EC) serve para o TLS 1.3 com certificado de cliente. Um que
+não declara, como o RemoteID, fica no TLS 1.2.
+
+Medido em 2026-11-18 com o driver GD Burti sobre o SoftHSM, contra um
+`openssl s_server` só em TLS 1.3 que exige o certificado: o NSS (`tstclnt`) e
+o GnuTLS (`gnutls-cli`) fecharam o handshake com a chave RSA e com a EC, no
+Debian 13 e no Debian forky.
+
+No Firefox 160 do Fedora 44 (2026-11-24, VM GNOME pareada com esse servidor),
+o mesmo servidor abriu a página com as duas chaves: o Firefox pediu o PIN
+pessoal do token, listou os dois certificados e assinou por `CKM_RSA_PKCS_PSS`
+com a chave RSA e por `CKM_ECDSA` com a EC. Nenhum passo a mais do que no
+TLS 1.2.
+
+Pelo OpenSSL, com o `pkcs11-provider`:
+
+- Carregue o provedor `default` antes do `pkcs11` e prefira o `default`
+  (`?provider=default`) para o que não é a chave do token. Na ordem inversa, o
+  `pkcs11-provider` tenta conferir a assinatura do servidor e gerar a chave
+  efêmera da troca dentro do token, que é só de leitura, e o handshake cai.
+- Com uma chave RSA, use o `pkcs11-provider` 1.3.0 (Debian forky), que fechou
+  com as duas chaves. O 1.0 (Debian 13) perde os parâmetros do PSS quando o
+  token não tem o `CKM_SHA256_RSA_PKCS_PSS` e falha antes de pedir a
+  assinatura; com a chave EC, ele funciona.
+
 ## Se o Firefox disser que a conexão expirou
 
 O Firefox dá 30 segundos para estabelecer uma conexão segura, contando o PIN, a

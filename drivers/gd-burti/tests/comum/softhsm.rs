@@ -1,0 +1,332 @@
+//! Os tokens do SoftHSM2 que os testes usam no lugar do `libaetpkss.so`.
+//!
+//! O SoftHSM lê a configuração de `SOFTHSM2_CONF`, que só um processo novo
+//! recebe sem `unsafe`. Por isso os tokens são preparados pelo próprio binário
+//! de teste, relançado com a variável no teste `auxiliar_preparar`, que todo
+//! arquivo que usa [`preparar`] declara chamando [`auxiliar`].
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::{Value, json};
+
+pub const PIN: &str = "4321";
+pub const PIN_SO: &str = "87654321";
+/// O certificado da AC da cadeia, que o token guarda sem a chave.
+pub const ID_DA_AC: &[u8] = &[0xca];
+pub const ID_RSA: &[u8] = &[0x01, 0x02];
+pub const ID_EC: &[u8] = &[0x0e, 0xc0];
+pub const ID_RSA_B: &[u8] = &[0xb0];
+
+/// O módulo do SoftHSM: `SOFTHSM2_MODULE`, ou onde as distribuições o põem.
+pub fn modulo() -> PathBuf {
+    if let Some(caminho) = std::env::var_os("SOFTHSM2_MODULE") {
+        return caminho.into();
+    }
+    [
+        "/usr/lib/softhsm/libsofthsm2.so",
+        "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
+        "/usr/lib64/pkcs11/libsofthsm2.so",
+        "/usr/local/lib/softhsm/libsofthsm2.so",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists())
+    .expect("sem o SoftHSM2: instale o pacote softhsm2 ou aponte SOFTHSM2_MODULE")
+}
+
+/// Dois tokens no SoftHSM: o A, com uma chave RSA, uma EC e o certificado de
+/// uma AC; o B, com uma chave RSA. Devolve a configuração e as séries.
+pub fn preparar(trabalho: &Path) -> (PathBuf, String, String) {
+    let tokens = trabalho.join("tokens");
+    std::fs::create_dir_all(&tokens).unwrap();
+    let conf = trabalho.join("softhsm2.conf");
+    std::fs::write(
+        &conf,
+        format!(
+            "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\n",
+            tokens.display()
+        ),
+    )
+    .unwrap();
+    let saida = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "auxiliar_preparar", "--nocapture"])
+        .env("SOFTHSM2_CONF", &conf)
+        .env("GD_BURTI_AUXILIAR", trabalho)
+        .env("SOFTHSM2_MODULE", modulo())
+        .output()
+        .unwrap();
+    assert!(
+        saida.status.success(),
+        "a preparação do SoftHSM falhou: {}{}",
+        String::from_utf8_lossy(&saida.stdout),
+        String::from_utf8_lossy(&saida.stderr)
+    );
+    let series: Value =
+        serde_json::from_slice(&std::fs::read(trabalho.join("series.json")).unwrap()).unwrap();
+    (
+        conf,
+        series["a"].as_str().unwrap().to_owned(),
+        series["b"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// O corpo do `auxiliar_preparar`: a preparação, num processo com
+/// `SOFTHSM2_CONF`. Sem `GD_BURTI_AUXILIAR`, não faz nada.
+pub fn auxiliar() {
+    let Some(trabalho) = std::env::var_os("GD_BURTI_AUXILIAR") else {
+        return;
+    };
+    let series = preparo::preparar(&modulo());
+    std::fs::write(
+        Path::new(&trabalho).join("series.json"),
+        json!({"a": series.0, "b": series.1}).to_string(),
+    )
+    .unwrap();
+}
+
+mod preparo {
+    use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
+    use cryptoki::mechanism::Mechanism;
+    use cryptoki::object::{
+        Attribute, AttributeType, CertificateType, KeyType, ObjectClass, ObjectHandle,
+    };
+    use cryptoki::session::{Session, UserType};
+    use cryptoki::types::AuthPin;
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, IsCa, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256,
+        PublicKeyData, SerialNumber, SignatureAlgorithm, SigningKey,
+    };
+
+    use super::{ID_DA_AC, ID_EC, ID_RSA, ID_RSA_B, PIN, PIN_SO};
+
+    /// O OID da curva P-256, como o CKA_EC_PARAMS o leva.
+    const P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+
+    /// Uma chave do SoftHSM assinando o certificado pelo rcgen.
+    struct NoToken<'a> {
+        sessao: &'a Session,
+        privada: ObjectHandle,
+        publica: Vec<u8>,
+        ec: bool,
+    }
+
+    impl PublicKeyData for NoToken<'_> {
+        fn der_bytes(&self) -> &[u8] {
+            &self.publica
+        }
+        fn algorithm(&self) -> &'static SignatureAlgorithm {
+            if self.ec {
+                &PKCS_ECDSA_P256_SHA256
+            } else {
+                &PKCS_RSA_SHA256
+            }
+        }
+    }
+
+    impl SigningKey for NoToken<'_> {
+        fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+            // O SoftHSM não tem o CKM_ECDSA_SHA256: o hash vem daqui.
+            let hash;
+            let (mecanismo, dados) = if self.ec {
+                hash = ring::digest::digest(&ring::digest::SHA256, msg);
+                (Mechanism::Ecdsa, hash.as_ref())
+            } else {
+                (Mechanism::Sha256RsaPkcs, msg)
+            };
+            let assinatura = self
+                .sessao
+                .sign(&mecanismo, self.privada, dados)
+                .map_err(|e| {
+                    eprintln!("assinatura do certificado no SoftHSM: {e}");
+                    rcgen::Error::RemoteKeyError
+                })?;
+            Ok(if self.ec {
+                ecdsa_der(&assinatura)
+            } else {
+                assinatura
+            })
+        }
+    }
+
+    fn der(tag: u8, conteudo: &[u8]) -> Vec<u8> {
+        let mut saida = vec![tag];
+        match conteudo.len() {
+            n if n < 0x80 => saida.push(n as u8),
+            n if n < 0x100 => saida.extend([0x81, n as u8]),
+            n => saida.extend([0x82, (n >> 8) as u8, n as u8]),
+        }
+        saida.extend_from_slice(conteudo);
+        saida
+    }
+
+    fn inteiro(bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = bytes;
+        while bytes.len() > 1 && bytes[0] == 0 {
+            bytes = &bytes[1..];
+        }
+        let mut conteudo = Vec::new();
+        if bytes[0] & 0x80 != 0 {
+            conteudo.push(0);
+        }
+        conteudo.extend_from_slice(bytes);
+        der(0x02, &conteudo)
+    }
+
+    /// r‖s do PKCS#11 para o ECDSA-Sig-Value do X.509.
+    fn ecdsa_der(bruta: &[u8]) -> Vec<u8> {
+        let (r, s) = bruta.split_at(bruta.len() / 2);
+        der(0x30, &[inteiro(r), inteiro(s)].concat())
+    }
+
+    fn atributo(sessao: &Session, objeto: ObjectHandle, tipo: AttributeType) -> Vec<u8> {
+        match sessao.get_attributes(objeto, &[tipo]).unwrap().pop() {
+            Some(Attribute::Modulus(v) | Attribute::PublicExponent(v) | Attribute::EcPoint(v)) => v,
+            outro => panic!("{outro:?}"),
+        }
+    }
+
+    fn gerar(sessao: &Session, id: &[u8], ec: bool) -> (ObjectHandle, Vec<u8>) {
+        let comuns_pub = [
+            Attribute::Token(true),
+            Attribute::Verify(true),
+            Attribute::Id(id.to_vec()),
+        ];
+        let privada = [
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Sensitive(true),
+            Attribute::Sign(true),
+            Attribute::Id(id.to_vec()),
+        ];
+        if ec {
+            let mut publica = comuns_pub.to_vec();
+            publica.push(Attribute::EcParams(P256.to_vec()));
+            let (pubk, privk) = sessao
+                .generate_key_pair(&Mechanism::EccKeyPairGen, &publica, &privada)
+                .unwrap();
+            // CKA_EC_POINT é o ponto dentro de um OCTET STRING.
+            let ponto = atributo(sessao, pubk, AttributeType::EcPoint);
+            (privk, ponto[2..].to_vec())
+        } else {
+            let mut publica = comuns_pub.to_vec();
+            publica.push(Attribute::ModulusBits(2048.into()));
+            publica.push(Attribute::PublicExponent(vec![1, 0, 1]));
+            let (pubk, privk) = sessao
+                .generate_key_pair(&Mechanism::RsaPkcsKeyPairGen, &publica, &privada)
+                .unwrap();
+            let modulo = atributo(sessao, pubk, AttributeType::Modulus);
+            let expoente = atributo(sessao, pubk, AttributeType::PublicExponent);
+            (
+                privk,
+                der(0x30, &[inteiro(&modulo), inteiro(&expoente)].concat()),
+            )
+        }
+    }
+
+    fn gravar_certificado(sessao: &Session, id: &[u8], chave: &NoToken, nome: &str, ac: bool) {
+        let mut parametros = CertificateParams::default();
+        // Sem a feature `crypto`, o rcgen não sorteia o número de série.
+        parametros.serial_number =
+            Some(SerialNumber::from_slice(&[[0x01].as_slice(), id].concat()));
+        parametros.distinguished_name.push(DnType::CommonName, nome);
+        if ac {
+            parametros.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        }
+        let certificado = parametros.self_signed(chave).unwrap();
+        let der = certificado.der().to_vec();
+        let (_, lido) =
+            <x509_parser::certificate::X509Certificate as x509_parser::prelude::FromDer<_>>::from_der(
+                &der,
+            )
+            .unwrap();
+        sessao
+            .create_object(&[
+                Attribute::Class(ObjectClass::CERTIFICATE),
+                Attribute::CertificateType(CertificateType::X_509),
+                Attribute::Token(true),
+                Attribute::Id(id.to_vec()),
+                Attribute::Label(nome.as_bytes().to_vec()),
+                Attribute::Subject(lido.subject().as_raw().to_vec()),
+                Attribute::Value(der),
+            ])
+            .unwrap();
+    }
+
+    /// Inicializa um token vazio e devolve a sessão de usuário e a série.
+    fn novo_token(contexto: &Pkcs11, rotulo: &str) -> (Session, String) {
+        let livre = contexto
+            .get_all_slots()
+            .unwrap()
+            .into_iter()
+            .find(|s| !contexto.get_token_info(*s).unwrap().token_initialized())
+            .expect("o SoftHSM sempre tem um slot livre");
+        contexto
+            .init_token(livre, &AuthPin::from(PIN_SO), rotulo)
+            .unwrap();
+        // O SoftHSM renumera o slot de um token inicializado.
+        let slot = contexto
+            .get_slots_with_token()
+            .unwrap()
+            .into_iter()
+            .find(|s| contexto.get_token_info(*s).unwrap().label() == rotulo)
+            .unwrap();
+        let serie = contexto
+            .get_token_info(slot)
+            .unwrap()
+            .serial_number()
+            .trim()
+            .to_owned();
+        let sessao = contexto.open_rw_session(slot).unwrap();
+        sessao
+            .login(UserType::So, Some(&AuthPin::from(PIN_SO)))
+            .unwrap();
+        sessao.init_pin(&AuthPin::from(PIN)).unwrap();
+        sessao.logout().unwrap();
+        sessao
+            .login(UserType::User, Some(&AuthPin::from(PIN)))
+            .unwrap();
+        (sessao, serie)
+    }
+
+    fn chave_com_certificado(sessao: &Session, id: &[u8], ec: bool, nome: &str, ac: bool) {
+        let (privada, publica) = gerar(sessao, id, ec);
+        let chave = NoToken {
+            sessao,
+            privada,
+            publica,
+            ec,
+        };
+        gravar_certificado(sessao, id, &chave, nome, ac);
+        if ac {
+            // A chave da AC não fica no token: só o certificado.
+            sessao.destroy_object(privada).unwrap();
+            for publica in sessao
+                .find_objects(&[
+                    Attribute::Class(ObjectClass::PUBLIC_KEY),
+                    Attribute::KeyType(KeyType::RSA),
+                    Attribute::Id(id.to_vec()),
+                ])
+                .unwrap()
+            {
+                sessao.destroy_object(publica).unwrap();
+            }
+        }
+    }
+
+    pub fn preparar(modulo: &std::path::Path) -> (String, String) {
+        let contexto = Pkcs11::new(modulo).unwrap();
+        contexto
+            .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+            .unwrap();
+        let (a, serie_a) = novo_token(&contexto, "gd-burti-a");
+        chave_com_certificado(&a, ID_RSA, false, "FULANO DE TAL:00000000000", false);
+        chave_com_certificado(&a, ID_EC, true, "FULANO DE TAL:00000000000", false);
+        chave_com_certificado(&a, ID_DA_AC, false, "AC Teste", true);
+        drop(a);
+        let (b, serie_b) = novo_token(&contexto, "gd-burti-b");
+        chave_com_certificado(&b, ID_RSA_B, false, "BELTRANO:11111111111", false);
+        drop(b);
+        (serie_a, serie_b)
+    }
+}

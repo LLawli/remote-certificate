@@ -23,7 +23,7 @@ sha2 = "0.11"
 agente.workspace = true
 cryptoki-sys = "0.5"
 ipc.workspace = true
-pkcs11.workspace = true
+pkcs11 = { workspace = true, features = ["hospedeiro"] }
 rede = { path = "../../crates/rede" }
 servidor = { path = "../../crates/servidor" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

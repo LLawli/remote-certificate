@@ -9,23 +9,30 @@ use std::collections::BTreeMap;
 use cryptoki_sys::*;
 use ipc::ChaveDoToken;
 use protocolo::Mecanismo;
-use rsa::PublicKey;
-use rsa::traits::PublicKeyParts;
 
-use crate::objetos::{Atributo, Objeto, ler_certificado};
+use crate::objetos::{Atributo, Objeto, Publica, ler_certificado};
 
-/// Os mecanismos que a face expõe, e o nome de cada um no contrato. RSA-PSS
-/// e ECDSA ficam de fora: o contrato não leva os parâmetros deles, e nenhum
-/// driver aceito os declara.
-pub const MECANISMOS: [(Mecanismo, CK_MECHANISM_TYPE); 4] = [
+/// Os mecanismos que a face expõe, e o nome de cada um no contrato.
+pub const MECANISMOS: [(Mecanismo, CK_MECHANISM_TYPE); 6] = [
     (Mecanismo::RsaPkcs, CKM_RSA_PKCS),
     (Mecanismo::Sha256RsaPkcs, CKM_SHA256_RSA_PKCS),
     (Mecanismo::Sha384RsaPkcs, CKM_SHA384_RSA_PKCS),
     (Mecanismo::Sha512RsaPkcs, CKM_SHA512_RSA_PKCS),
+    (Mecanismo::RsaPkcsPss, CKM_RSA_PKCS_PSS),
+    (Mecanismo::Ecdsa, CKM_ECDSA),
 ];
 
 pub fn do_contrato(tipo: CK_MECHANISM_TYPE) -> Option<Mecanismo> {
     MECANISMOS.iter().find(|(_, t)| *t == tipo).map(|(m, _)| *m)
+}
+
+/// Se o mecanismo é do tipo da chave: um driver que declarasse ECDSA numa
+/// chave RSA faria o hospedeiro pedir uma assinatura que nunca confere.
+fn serve(tipo: CK_MECHANISM_TYPE, publica: &Publica) -> bool {
+    match publica {
+        Publica::Rsa(_) => tipo != CKM_ECDSA,
+        Publica::Ec { .. } => tipo == CKM_ECDSA,
+    }
 }
 
 /// Uma chave que assina: o par de objetos que aponta para ela.
@@ -33,16 +40,9 @@ pub struct Chave {
     /// O id da chave no token do servidor.
     pub id: String,
     pub mecanismos: Vec<CK_MECHANISM_TYPE>,
-    pub publica: PublicKey,
+    pub publica: Publica,
     pub privada: CK_OBJECT_HANDLE,
     pub handle_publica: CK_OBJECT_HANDLE,
-}
-
-impl Chave {
-    /// O tamanho de toda assinatura e cifra: o do módulo da chave.
-    pub fn bytes(&self) -> usize {
-        self.publica.size()
-    }
 }
 
 pub struct Slot {
@@ -84,13 +84,15 @@ impl Slot {
             .collect()
     }
 
-    /// O maior e o menor tamanho de chave, em bits, para `C_GetMechanismInfo`.
-    pub fn bits(&self) -> (CK_ULONG, CK_ULONG) {
-        let bits = self.chaves.iter().map(|c| c.bytes() as CK_ULONG * 8);
-        (
-            bits.clone().min().unwrap_or(2048),
-            bits.max().unwrap_or(2048),
-        )
+    /// O menor e o maior tamanho, em bits, das chaves que declaram o
+    /// mecanismo, para `C_GetMechanismInfo`. `None` se nenhuma o declara.
+    pub fn bits(&self, tipo: CK_MECHANISM_TYPE) -> Option<(CK_ULONG, CK_ULONG)> {
+        let bits = self
+            .chaves
+            .iter()
+            .filter(|c| c.mecanismos.contains(&tipo))
+            .map(|c| c.publica.bits());
+        Some((bits.clone().min()?, bits.max()?))
     }
 }
 
@@ -164,32 +166,28 @@ pub fn montar(listagem: &[ChaveDoToken], numeracao: &mut Numeracao) -> Vec<Slot>
     slots
 }
 
-/// Os três objetos de uma chave. Uma chave que não é RSA, de certificado
-/// ilegível ou sem mecanismo que a face exponha, fica de fora sem derrubar as
-/// outras.
+/// Os três objetos de uma chave. Uma chave que não é RSA nem EC de curva
+/// conhecida, de certificado ilegível ou sem mecanismo que a face exponha,
+/// fica de fora sem derrubar as outras.
 fn acrescentar(slot: &mut Slot, item: &ChaveDoToken, numeracao: &mut Numeracao) {
-    let mecanismos: Vec<CK_MECHANISM_TYPE> = MECANISMOS
-        .iter()
-        .filter(|(m, _)| item.chave.mecanismos.contains(m))
-        .map(|(_, t)| *t)
-        .collect();
-    if mecanismos.is_empty() {
-        return;
-    }
     let Ok(campos) = ler_certificado(&item.chave.certificado) else {
         return;
     };
     let Some(publica) = campos.publica.clone() else {
         return;
     };
+    let mecanismos: Vec<CK_MECHANISM_TYPE> = MECANISMOS
+        .iter()
+        .filter(|(m, t)| item.chave.mecanismos.contains(m) && serve(*t, &publica))
+        .map(|(_, t)| *t)
+        .collect();
+    if mecanismos.is_empty() {
+        return;
+    }
     let rotulo = campos
         .nome
         .clone()
         .unwrap_or_else(|| item.chave.rotulo.clone());
-    // `to_be_bytes_trimmed_vartime` tira os zeros à esquerda, como o Cryptoki
-    // manda.
-    let modulo = publica.n().to_be_bytes_trimmed_vartime().to_vec();
-    let expoente = publica.e().to_be_bytes_trimmed_vartime().to_vec();
     let token = &item.token;
     let id = &item.chave.id;
     let certificado = numeracao.objeto(token, id, CERTIFICADO);
@@ -199,8 +197,8 @@ fn acrescentar(slot: &mut Slot, item: &ChaveDoToken, numeracao: &mut Numeracao) 
     // certificado de uma busca e o toma pelo do titular.
     slot.objetos.extend([
         Objeto::certificado(certificado, &item.chave.certificado, &campos, &rotulo),
-        Objeto::chave_privada(privada, &campos, &rotulo, &modulo, &expoente),
-        Objeto::chave_publica(handle_publica, &campos, &rotulo, &modulo, &expoente),
+        Objeto::chave_privada(privada, &campos, &rotulo, &publica),
+        Objeto::chave_publica(handle_publica, &campos, &rotulo, &publica),
     ]);
     slot.chaves.push(Chave {
         id: id.clone(),
@@ -209,4 +207,70 @@ fn acrescentar(slot: &mut Slot, item: &ChaveDoToken, numeracao: &mut Numeracao) 
         privada,
         handle_publica,
     });
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+    use crate::objetos::ulong;
+    use protocolo::Chave as ChaveDoContrato;
+
+    /// Uma chave P-384 com um certificado dela.
+    fn listagem_ec(mecanismos: Vec<Mecanismo>) -> Vec<ChaveDoToken> {
+        let par = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let certificado = rcgen::CertificateParams::new(["ec.local".to_string()])
+            .unwrap()
+            .self_signed(&par)
+            .unwrap();
+        vec![ChaveDoToken {
+            token: "GD".into(),
+            chave: ChaveDoContrato {
+                id: "0ec0".into(),
+                rotulo: "EC".into(),
+                certificado: certificado.der().to_vec(),
+                mecanismos,
+            },
+        }]
+    }
+
+    #[test]
+    fn a_chave_ec_mostra_a_curva_o_ponto_e_so_o_ecdsa() {
+        // Um driver que declarasse RSA numa chave EC: fica só o que serve.
+        let listagem = listagem_ec(vec![Mecanismo::RsaPkcs, Mecanismo::Ecdsa]);
+        let slots = montar(&listagem, &mut Numeracao::default());
+        let [slot] = &slots[..] else {
+            panic!("um slot");
+        };
+        let [chave] = &slot.chaves[..] else {
+            panic!("uma chave");
+        };
+        assert_eq!(chave.mecanismos, [CKM_ECDSA]);
+        assert_eq!(slot.mecanismos(), [CKM_ECDSA]);
+        assert_eq!(slot.bits(CKM_ECDSA), Some((384, 384)));
+        assert_eq!(slot.bits(CKM_RSA_PKCS), None);
+        assert_eq!(chave.publica.bytes_da_assinatura(), 96, "r‖s da P-384");
+
+        let p384 = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
+        for handle in [chave.privada, chave.handle_publica] {
+            let objeto = slot.objeto(handle).unwrap();
+            assert_eq!(objeto.atributo(CKA_KEY_TYPE), Some(&ulong(CKK_EC)[..]));
+            assert_eq!(objeto.atributo(CKA_EC_PARAMS), Some(&p384[..]));
+            assert_eq!(objeto.atributo(CKA_MODULUS), None);
+        }
+        let publica = slot.objeto(chave.handle_publica).unwrap();
+        let ponto = publica.atributo(CKA_EC_POINT).unwrap();
+        // Um OCTET STRING com o ponto não comprimido: 0x04, x e y.
+        assert_eq!(ponto[..3], [0x04, 97, 0x04]);
+        assert_eq!(ponto.len(), 2 + 97);
+        assert_eq!(publica.atributo(CKA_ENCRYPT), Some(&[CK_FALSE][..]));
+        assert!(slot.objeto(chave.privada).unwrap().e_sensivel(CKA_VALUE));
+    }
+
+    #[test]
+    fn chave_ec_sem_ecdsa_declarado_fica_de_fora() {
+        let listagem = listagem_ec(vec![Mecanismo::Sha256RsaPkcs]);
+        let slots = montar(&listagem, &mut Numeracao::default());
+        assert!(slots[0].chaves.is_empty());
+        assert!(slots[0].objetos.is_empty());
+    }
 }

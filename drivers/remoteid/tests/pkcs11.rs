@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use comum::*;
 use cryptoki_sys::*;
 use protocolo::Segredo;
+use remote_certificate_pkcs11::chamar;
+use remote_certificate_pkcs11::hospedeiro::*;
 use rsa::PublicKey;
 use rsa::pkcs1v15::Pkcs1v15Sign;
 use rsa::pkcs8::DecodePublicKey;
@@ -31,137 +33,6 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use x509_cert::Certificate;
 use x509_cert::der::{Decode, Encode};
-
-/// Chama uma função da tabela.
-macro_rules! chamar {
-    ($nome:ident($($arg:expr),* $(,)?)) => {
-        unsafe { (funcoes().$nome.expect(stringify!($nome)))($($arg),*) }
-    };
-}
-
-fn funcoes() -> &'static CK_FUNCTION_LIST {
-    let mut lista = ptr::null_mut();
-    let rv = unsafe { remote_certificate_pkcs11::C_GetFunctionList(&mut lista) };
-    assert_eq!(rv, CKR_OK);
-    unsafe { &*lista }
-}
-
-fn slots() -> Vec<CK_SLOT_ID> {
-    let mut n: CK_ULONG = 0;
-    assert_eq!(
-        chamar!(C_GetSlotList(CK_TRUE, ptr::null_mut(), &mut n)),
-        CKR_OK
-    );
-    let mut lista = vec![0; n as usize];
-    assert_eq!(
-        chamar!(C_GetSlotList(CK_TRUE, lista.as_mut_ptr(), &mut n)),
-        CKR_OK
-    );
-    lista
-}
-
-fn info_do_token(slot: CK_SLOT_ID) -> CK_TOKEN_INFO {
-    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
-    assert_eq!(chamar!(C_GetTokenInfo(slot, &mut info)), CKR_OK);
-    info
-}
-
-fn buscar(sessao: CK_SESSION_HANDLE, classe: CK_OBJECT_CLASS) -> Vec<CK_OBJECT_HANDLE> {
-    let mut valor = classe;
-    let mut gabarito = [CK_ATTRIBUTE {
-        type_: CKA_CLASS,
-        pValue: (&raw mut valor).cast(),
-        ulValueLen: size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
-    }];
-    assert_eq!(
-        chamar!(C_FindObjectsInit(sessao, gabarito.as_mut_ptr(), 1)),
-        CKR_OK
-    );
-    let mut achados = [0; 16];
-    let mut n: CK_ULONG = 0;
-    assert_eq!(
-        chamar!(C_FindObjects(sessao, achados.as_mut_ptr(), 16, &mut n)),
-        CKR_OK
-    );
-    assert_eq!(chamar!(C_FindObjectsFinal(sessao)), CKR_OK);
-    achados[..n as usize].to_vec()
-}
-
-/// Um atributo em duas passadas, como manda a especificação.
-fn atributo(
-    sessao: CK_SESSION_HANDLE,
-    objeto: CK_OBJECT_HANDLE,
-    tipo: CK_ATTRIBUTE_TYPE,
-) -> Vec<u8> {
-    let mut modelo = [CK_ATTRIBUTE {
-        type_: tipo,
-        pValue: ptr::null_mut(),
-        ulValueLen: 0,
-    }];
-    assert_eq!(
-        chamar!(C_GetAttributeValue(sessao, objeto, modelo.as_mut_ptr(), 1)),
-        CKR_OK
-    );
-    let mut valor = vec![0u8; modelo[0].ulValueLen as usize];
-    modelo[0].pValue = valor.as_mut_ptr().cast();
-    assert_eq!(
-        chamar!(C_GetAttributeValue(sessao, objeto, modelo.as_mut_ptr(), 1)),
-        CKR_OK
-    );
-    valor
-}
-
-fn entrar(sessao: CK_SESSION_HANDLE, pin: &str) -> CK_RV {
-    let mut pin = pin.as_bytes().to_vec();
-    chamar!(C_Login(
-        sessao,
-        CKU_USER,
-        pin.as_mut_ptr(),
-        pin.len() as CK_ULONG
-    ))
-}
-
-fn iniciar(
-    sessao: CK_SESSION_HANDLE,
-    mecanismo: CK_MECHANISM_TYPE,
-    chave: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    let mut mecanismo = CK_MECHANISM {
-        mechanism: mecanismo,
-        pParameter: ptr::null_mut(),
-        ulParameterLen: 0,
-    };
-    chamar!(C_SignInit(sessao, &mut mecanismo, chave))
-}
-
-/// `C_Sign` em duas passadas: primeiro o tamanho, depois a assinatura.
-fn assinar(sessao: CK_SESSION_HANDLE, dados: &[u8]) -> Result<Vec<u8>, CK_RV> {
-    let mut dados = dados.to_vec();
-    let mut n: CK_ULONG = 0;
-    let rv = chamar!(C_Sign(
-        sessao,
-        dados.as_mut_ptr(),
-        dados.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut n
-    ));
-    if rv != CKR_OK {
-        return Err(rv);
-    }
-    let mut assinatura = vec![0u8; n as usize];
-    let rv = chamar!(C_Sign(
-        sessao,
-        dados.as_mut_ptr(),
-        dados.len() as CK_ULONG,
-        assinatura.as_mut_ptr(),
-        &mut n
-    ));
-    if rv != CKR_OK {
-        return Err(rv);
-    }
-    assinatura.truncate(n as usize);
-    Ok(assinatura)
-}
 
 fn publica_do_certificado(der: &[u8]) -> PublicKey {
     let certificado = Certificate::from_der(der).expect("X.509 em DER");
@@ -232,33 +103,14 @@ fn a_face_e_um_token_local_que_assina_com_o_pin_pessoal_e_a_janela_do_otp() {
     let info = info_do_token(slot);
     assert!(info.label.starts_with(b"RemoteID "), "{:?}", info.label);
     assert_ne!(info.flags & CKF_LOGIN_REQUIRED, 0);
-    let mut n: CK_ULONG = 0;
-    assert_eq!(
-        chamar!(C_GetMechanismList(slot, ptr::null_mut(), &mut n)),
-        CKR_OK
-    );
-    let mut mecanismos = vec![0; n as usize];
-    assert_eq!(
-        chamar!(C_GetMechanismList(slot, mecanismos.as_mut_ptr(), &mut n)),
-        CKR_OK
-    );
+    let mecanismos = mecanismos(slot);
     assert!(mecanismos.contains(&CKM_RSA_PKCS) && mecanismos.contains(&CKM_SHA256_RSA_PKCS));
     assert!(
         !mecanismos.contains(&CKM_RSA_PKCS_PSS),
         "a Certisign não assina PSS"
     );
 
-    let mut sessao = 0;
-    assert_eq!(
-        chamar!(C_OpenSession(
-            slot,
-            CKF_SERIAL_SESSION,
-            ptr::null_mut(),
-            None,
-            &mut sessao
-        )),
-        CKR_OK
-    );
+    let sessao = abrir_sessao(slot);
     let [certificado] = buscar(sessao, CKO_CERTIFICATE)[..] else {
         panic!("um certificado");
     };
@@ -351,17 +203,7 @@ fn a_face_e_um_token_local_que_assina_com_o_pin_pessoal_e_a_janela_do_otp() {
     let comeco = Instant::now();
     assert_eq!(slots(), [slot]);
     info_do_token(slot);
-    let mut outra = 0;
-    assert_eq!(
-        chamar!(C_OpenSession(
-            slot,
-            CKF_SERIAL_SESSION,
-            ptr::null_mut(),
-            None,
-            &mut outra
-        )),
-        CKR_OK
-    );
+    abrir_sessao(slot);
     assert!(
         comeco.elapsed() < Duration::from_millis(500),
         "esperou a janela: {:?}",
@@ -406,27 +248,17 @@ fn a_face_e_um_token_local_que_assina_com_o_pin_pessoal_e_a_janela_do_otp() {
 
     // RSA-PSS (o TLS 1.3) não é do token: "não suportado", mesmo com os
     // parâmetros dele, e não "parâmetro errado".
-    let mut parametros = CK_RSA_PKCS_PSS_PARAMS {
+    let parametros = CK_RSA_PKCS_PSS_PARAMS {
         hashAlg: CKM_SHA256,
         mgf: CKG_MGF1_SHA256,
         sLen: 32,
     };
-    let mut pss = CK_MECHANISM {
-        mechanism: CKM_RSA_PKCS_PSS,
-        pParameter: (&raw mut parametros).cast(),
-        ulParameterLen: size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
-    };
     assert_eq!(
-        chamar!(C_SignInit(sessao, &mut pss, privada)),
+        iniciar_com_pss(sessao, CKM_RSA_PKCS_PSS, parametros, privada),
         CKR_MECHANISM_INVALID
     );
-    let mut com_lixo = CK_MECHANISM {
-        mechanism: CKM_SHA256_RSA_PKCS,
-        pParameter: (&raw mut parametros).cast(),
-        ulParameterLen: size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
-    };
     assert_eq!(
-        chamar!(C_SignInit(sessao, &mut com_lixo, privada)),
+        iniciar_com_pss(sessao, CKM_SHA256_RSA_PKCS, parametros, privada),
         CKR_MECHANISM_PARAM_INVALID
     );
 

@@ -472,14 +472,20 @@ dependencies = [
 name = "driver-gd-burti"
 version = "0.1.0"
 dependencies = [
+ "agente",
  "base64 0.22.1",
  "cryptoki",
+ "cryptoki-sys",
+ "ipc",
+ "pkcs11",
  "protocolo",
  "rcgen",
  "ring",
  "rustix",
  "serde",
  "serde_json",
+ "servidor",
+ "tokio",
  "x509-parser",
 ]
 
@@ -1435,6 +1441,7 @@ dependencies = [
  "ipc",
  "protocolo",
  "rand_core 0.10.1",
+ "rcgen",
  "rsa",
  "serde_json",
  "sha2",

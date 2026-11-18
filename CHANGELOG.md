@@ -84,6 +84,13 @@ Todas as mudanças visíveis deste projeto. O formato segue o
   do servidor aparece como um token local que pede o PIN pessoal no login e
   assina com `CKM_RSA_PKCS` e `CKM_SHA256/384/512_RSA_PKCS`. Testado com o
   `pkcs11-tool`, o `p11tool` e pelo `p11-kit-proxy`.
+- A face também mostra chaves EC e assina com `CKM_RSA_PKCS_PSS` e
+  `CKM_ECDSA` quando o driver os declara: um token assim serve para o TLS
+  1.3. Parâmetros de PSS fora do contrato são recusados no `C_SignInit`, sem
+  chegar ao token. Testado num handshake TLS 1.3 com certificado de cliente
+  pelo Firefox (Fedora 44), pelo NSS, pelo GnuTLS e pelo OpenSSL
+  (`pkcs11-provider` 1.3.0); o
+  `docs/estacao.md` diz o que o OpenSSL pede.
 - `remote-certificate-dialogo`, a janela do OTP no Linux.
 - `scripts/laboratorio.sh`: um servidor e uma estação inteiros nesta máquina,
   para testar o módulo com programas de verdade. Com `SO_SERVIDOR=1`, só o

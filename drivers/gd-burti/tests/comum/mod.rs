@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+pub mod softhsm;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};

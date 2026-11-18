@@ -26,6 +26,8 @@
 
 mod canal;
 mod funcoes;
+#[cfg(feature = "hospedeiro")]
+pub mod hospedeiro;
 mod objetos;
 pub mod registro;
 mod slots;
@@ -113,6 +115,8 @@ struct Sessao {
 /// PJeOffice assina.
 struct Operacao {
     mecanismo: CK_MECHANISM_TYPE,
+    /// No RSA-PSS, o tamanho do hash que os parâmetros combinaram.
+    hash_do_pss: Option<usize>,
     chave: CK_OBJECT_HANDLE,
     acumulado: Vec<u8>,
 }

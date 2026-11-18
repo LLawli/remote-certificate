@@ -20,9 +20,15 @@ serde_json.workspace = true
 x509-parser = "0.18"
 
 [dev-dependencies]
+agente.workspace = true
 base64.workspace = true
+cryptoki-sys = "0.5"
+ipc.workspace = true
+pkcs11 = { workspace = true, features = ["hospedeiro"] }
 rcgen = { version = "0.14", default-features = false }
 ring = "0.17"
+servidor = { path = "../../crates/servidor" }
+tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 
 [lints]
 workspace = true
