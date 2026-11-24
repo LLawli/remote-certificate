@@ -78,7 +78,10 @@ fn confere(
 fn a_face_assina_com_cada_mecanismo_do_driver_e_mostra_o_token_para_tls_13() {
     let trabalho = diretorio("pkcs11");
     let (conf, serie_a, _) = preparar(&trabalho);
-    let socket = trabalho.join("execucao").join("agente.sock");
+    // O socket fica num caminho curto: o de um socket Unix tem no máximo 107
+    // bytes, e o diretório de trabalho do CI, com o PID, passa disso.
+    let dir_do_socket = std::env::temp_dir().join(format!("rc-gd-{}", std::process::id()));
+    let socket = dir_do_socket.join("agente.sock");
     let registro = trabalho.join("registro");
     // Antes de qualquer thread: o ambiente é do processo inteiro, e o driver
     // que o servidor sobe herda o SOFTHSM2_CONF.
@@ -137,13 +140,19 @@ fn a_face_assina_com_cada_mecanismo_do_driver_e_mostra_o_token_para_tls_13() {
         .unwrap();
     let agente = agente::Agente::novo(pareamento, Arc::new(SemJanela));
     let ouvir = socket.clone();
-    execucao.spawn(async move { agente::unix::ouvir(agente, &ouvir).await });
+    let ouvindo = execucao.spawn(async move { agente::unix::ouvir(agente, &ouvir).await });
     for _ in 0..100 {
         if socket.exists() {
             break;
         }
+        // Sem o agente, a face mostraria um slot vazio e o teste falharia
+        // longe da causa.
+        if ouvindo.is_finished() {
+            panic!("o agente parou: {:?}", execucao.block_on(ouvindo));
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
+    assert!(socket.exists(), "o agente não abriu {}", socket.display());
 
     // O token anuncia o que o driver declarou: RSA-PSS e ECDSA servem ao TLS
     // 1.3, e o ECDSA diz a curva que aceita.
@@ -299,6 +308,7 @@ fn a_face_assina_com_cada_mecanismo_do_driver_e_mostra_o_token_para_tls_13() {
     for segredo in [PIN_PESSOAL, "procuracao de teste"] {
         assert!(!texto.contains(segredo), "{segredo} no registro");
     }
+    let _ = std::fs::remove_dir_all(&dir_do_socket);
 }
 
 /// Não é um teste: a preparação dos tokens (ver `comum::softhsm`).
